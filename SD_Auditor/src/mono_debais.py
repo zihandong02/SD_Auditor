@@ -73,7 +73,7 @@ def lm_fit_y_general(features, Y, method='mlp'):
         predict_fn (Callable): Function that takes new features and returns predicted Y.
     """
     if method == 'mlp':
-        model = MLPRegressor(hidden_layer_sizes=(32, 32, 32), max_iter=1000, learning_rate="adaptive", learning_rate_init=1e-3)
+        model = MLPRegressor(hidden_layer_sizes=(32, 64, 32), max_iter=1000, learning_rate="adaptive", learning_rate_init=1e-3)
     elif method == 'mlpclass':
         model = MLPClassifier(hidden_layer_sizes=(32, 32, 32), max_iter=600)
     elif method == 'linreg':
@@ -871,7 +871,7 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mcar_var1(
     res = minimize_scalar(objective,
                           bounds=(alpha1_min, alpha1_max),
                           method="bounded")
-    alpha1_opt = float(res.x)
+    alpha1_opt = float(res.x)  # type: ignore[arg-type]
     alpha2_opt = tau - c * alpha1_opt
     alpha3_opt = 1.0 + (c - 1.0) * alpha1_opt - tau
     alpha_opt  = np.array([alpha1_opt, alpha2_opt, alpha3_opt])

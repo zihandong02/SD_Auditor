@@ -63,15 +63,17 @@ def lm_generate_complete_data(
 
     # 2 Independent noise ε
     eps = np.random.normal(0.0, sigma_eps, size=n)
+    eps2 = np.random.normal(0.0, sigma_eps, size=n)
+    eps3 = np.random.normal(0.0, sigma_eps*1.5, size=n)
 
     # 3 Core quantities
     X_theta   = X @ theta_star
     U1_beta   = U1 @ beta1_star
     U2_beta   = U2 @ beta2_star
 
-    Y  = X_theta + U1_beta + eps
-    W1 = X_theta + U1_beta + eps
-    W2 = X_theta + U1_beta
+    Y  = X_theta + U1_beta + U2_beta + eps
+    W1 = X_theta + U1_beta + eps2
+    W2 = X_theta + U2_beta + eps3
 
     # 4 Preference label
     V = (np.abs(W1 - Y) <= np.abs(W2 - Y)).astype(int)

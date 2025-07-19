@@ -7,4 +7,5 @@ __all__ = [
     "SEED",
     "sample_split_three",
     "sample_split_two",
+    "dump_run_simple",
 ]

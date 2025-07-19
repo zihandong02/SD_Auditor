@@ -1,4 +1,5 @@
 import os, sys, numpy as np, pandas as pd
+import datetime, json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -7,7 +8,7 @@ from statsmodels.stats.weightstats import _zconfint_generic, _zstat_generic
 sys.path.append(os.path.abspath(".."))
 
 # internal modules (from your src/ package)
-from src.utils           import SEED, set_global_seed
+from src.utils           import SEED, set_global_seed, dump_run_simple
 from src.data_generation import lm_generate_obs_data_mcar
 from src.mono_debais     import (
     lm_mono_debias_estimate_mcar_crossfit,
@@ -173,15 +174,15 @@ def lm_mcar(
 
 
 # 1) Define the grid of τ values you want to explore
-tau_values = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+tau_values = [2.0, 3.0, 4.0]
 
 
 d_x = 5
 d_u1 = 5
 d_u2 = 5
 common = dict(
-    n1=3000, n2=5000, reps=1,
-    d_x=5, d_u1=5, d_u2=5,
+    n1=2000, n2=10000, reps=10,
+    d_x=d_x, d_u1=d_u1, d_u2=d_u2,
     theta_star = np.arange(1, d_x  + 1) * 0.2,   # length d_x
     beta1_star = np.arange(1, d_u1 + 1) * 1.0,   # length d_u1
     beta2_star = np.arange(1, d_u2 + 1) * -0.4,  # length d_u2
@@ -191,28 +192,47 @@ common = dict(
     alpha_init = np.array([1/3, 1/3, 1/3])
 )
 
+# ------------------------------------------------------------------
+# 1)  run lm_mcar for each τ  →  build DataFrame `df`
+# ------------------------------------------------------------------
 rows = []
 for τ in tau_values:
-    res = lm_mcar(tau=τ, **common) # type: ignore
+    res = lm_mcar(tau=τ, **common)          # type: ignore[arg-type]
     res["tau"] = τ
     rows.append(res)
 
 df = pd.DataFrame(rows).set_index("tau").round(4)
-print(df)                     # <- plain text summary
 
-# -------------------------------------------------------------------
-# (2)  PLOTS
-# -------------------------------------------------------------------
-plt.figure(figsize=(7,3.5))
-plt.plot(df.index, df["mean_len_opt"],  marker='o', label="opt-alpha")
-plt.plot(df.index, df["mean_len_base"], marker='o', label="base-alpha")
-plt.xlabel(r'$\tau$'); plt.ylabel("CI length (first coord)")
-plt.tight_layout();  plt.legend();  plt.show()
+# ------------------------------------------------------------------
+# 2)  save summary + parameters, capture returned folder
+# ------------------------------------------------------------------
+params   = {"tau_values": tau_values, "common_args": common}
+time_dir = dump_run_simple(df=df, params=params)     # ← returns out-dir path
 
-plt.figure(figsize=(7,3.5))
-plt.plot(df.index, df["covg_opt"],  marker='o', label="opt-alpha")
-plt.plot(df.index, df["covg_base"], marker='o', label="base-alpha")
-plt.axhline(1-common["alpha_level"], ls='--', color='gray') # type: ignore
+# ------------------------------------------------------------------
+# 3)  Figure: CI length vs τ   (stored inside the same folder)
+# ------------------------------------------------------------------
+plt.figure(figsize=(7, 3.5))
+plt.plot(df.index, df["mean_len_opt"],  marker="o", label="opt-alpha")
+plt.plot(df.index, df["mean_len_base"], marker="o", label="base-alpha")
+plt.xlabel(r"$\tau$")
+plt.ylabel("CI length (first coord)")
+plt.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(time_dir, "ci_length_vs_tau.pdf"))
+plt.close()
+
+# ------------------------------------------------------------------
+# 4)  Figure: Coverage vs τ    (stored inside the same folder)
+# ------------------------------------------------------------------
+plt.figure(figsize=(7, 3.5))
+plt.plot(df.index, df["covg_opt"],  marker="o", label="opt-alpha")
+plt.plot(df.index, df["covg_base"], marker="o", label="base-alpha")
+plt.axhline(1 - common["alpha_level"], ls="--", color="gray")   # nominal level
 plt.ylim(0.5, 1.05)
-plt.xlabel(r'$\tau$'); plt.ylabel("Coverage (first coord)")
-plt.tight_layout();  plt.legend();  plt.show()
+plt.xlabel(r"$\tau$")
+plt.ylabel("Coverage (first coord)")
+plt.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(time_dir, "coverage_vs_tau.pdf"))
+plt.close()
