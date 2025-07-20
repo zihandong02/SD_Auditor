@@ -73,7 +73,7 @@ def lm_fit_y_general(features, Y, method='mlp'):
         predict_fn (Callable): Function that takes new features and returns predicted Y.
     """
     if method == 'mlp':
-        model = MLPRegressor(hidden_layer_sizes=(32, 64, 32), max_iter=1000, learning_rate="adaptive", learning_rate_init=1e-3)
+        model = MLPRegressor(hidden_layer_sizes=(64, 64, 32), max_iter=1000, learning_rate="adaptive", learning_rate_init=1e-3)
     elif method == 'mlpclass':
         model = MLPClassifier(hidden_layer_sizes=(32, 32, 32), max_iter=600)
     elif method == 'linreg':

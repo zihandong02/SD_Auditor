@@ -102,7 +102,7 @@ def dump_run_simple(
     """
     # ---------- 1. construct timestamped subfolder -------------------
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(base_dir, f"{prefix}{timestamp}")
+    out_dir = os.path.join(base_dir, f"{prefix}_{timestamp}")
     os.makedirs(out_dir, exist_ok=True)          # create parent dirs if needed
 
     # ---------- 2. save summary table --------------------------------

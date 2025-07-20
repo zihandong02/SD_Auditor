@@ -63,8 +63,8 @@ def lm_generate_complete_data(
 
     # 2 Independent noise ε
     eps = np.random.normal(0.0, sigma_eps, size=n)
-    eps2 = np.random.normal(0.0, sigma_eps, size=n)
-    eps3 = np.random.normal(0.0, sigma_eps*1.5, size=n)
+    eps2 = np.random.normal(0.4, sigma_eps, size=n)
+    eps3 = np.random.normal(0.0, sigma_eps*2, size=n)
 
     # 3 Core quantities
     X_theta   = X @ theta_star
