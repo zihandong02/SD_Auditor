@@ -1,3 +1,5 @@
 /Archieve
 /BrainImg_NodeEmb
 /LCL
+__pycache__/
+*.pyc
