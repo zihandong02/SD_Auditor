@@ -1,156 +1,176 @@
-import numpy as np
-import sys, os
-sys.path.append(os.path.abspath("./src"))
-# print(os.path.abspath(".."))
-# from src.utils import *
-from src.utils import *
+# ── standard library ───────────────────────────────────────────────────
+from typing import Optional, Sequence, Tuple
+
+# ── third-party libraries ──────────────────────────────────────────────
+import torch
+from torch.distributions import MultivariateNormal
+
+# ── intra-package utilities ────────────────────────────────────────────
+from . import utils  # set_global_seed, get_device, …
+
+# ======================================================================
+# Private helpers
+# ======================================================================
+
+
+def _as_tensor(
+    x,
+    *,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Cast *x* (NumPy array, list, scalar, or Tensor) to a tensor on *device*."""
+    device = utils.get_device() if device is None else device
+    return torch.as_tensor(x, dtype=dtype, device=device)
+
+
+def _sample_mv(
+    n: int,
+    d: int,
+    cov: Optional[torch.Tensor],
+    *,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    device = utils.get_device() if device is None else device
+    mean = torch.zeros(d, device=device)
+    if cov is None:
+        cov = torch.eye(d, device=device)
+    else:
+        cov = _as_tensor(cov, device=device)
+    dist = MultivariateNormal(loc=mean, covariance_matrix=cov)
+    return dist.sample((n,))
+
+
+# ======================================================================
+# 1) Complete-data generator
+# ======================================================================
+
+
 def lm_generate_complete_data(
     n: int,
     d_x: int,
     d_u1: int,
     d_u2: int,
-    theta_star: np.ndarray,
-    beta1_star: np.ndarray,
-    beta2_star: np.ndarray,
+    theta_star,
+    beta1_star,
+    beta2_star,
     *,
-    Sigma_X: np.ndarray | None = None,
-    Sigma_U1: np.ndarray | None = None,
-    Sigma_U2: np.ndarray | None = None,
+    Sigma_X: Optional[torch.Tensor] = None,
+    Sigma_U1: Optional[torch.Tensor] = None,
+    Sigma_U2: Optional[torch.Tensor] = None,
     sigma_eps: float = 1.0,
-):
+    device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, ...]:
     """
-    Gaussian linear-mixture model (matches the screenshot).
+    Draw complete data for the Gaussian linear-mixture model
 
-    Randomness
-    ----------
-        X   ~ N(0, Σ_X)       shape (n, d_x)
-        U1  ~ N(0, Σ_{U1})    shape (n, d_u1)
-        U2  ~ N(0, Σ_{U2})    shape (n, d_u2)
-        ε   ~ N(0, σ_ε²)      shape (n,)
+        X  ~ 𝓝(0, Σ_X)      shape (n, d_x)
+        U1 ~ 𝓝(0, Σ_U1)     shape (n, d_u1)
+        U2 ~ 𝓝(0, Σ_U2)     shape (n, d_u2)
 
-    Constructs
-    ----------
-        Y  = X·θ* + U1·β1* + U2·β2* + ε           shape (n,)
-        W1 = X·θ* + U1·β1*                       shape (n,)
-        W2 = X·θ* + U2·β2*                       shape (n,)
-        V  = 𝟙{|W1−Y| ≤ |W2−Y|}                  shape (n,)
+        Y  = X·θ* + U1·β1* + U2·β2* + ε
+        W1 = X·θ* + U1·β1*             + ε₂
+        W2 = X·θ*             + U2·β2* + ε₃
+        V  = 𝟙{|W1 − Y| ≤ |W2 − Y|}
 
     Returns
     -------
-        X   : (n, d_x)
-        U1  : (n, d_u1)
-        U2  : (n, d_u2)
-        Y   : (n, 1)
-        W1  : (n, 1)
-        W2  : (n, 1)
-        V   : (n, 1)
+    (X, U1, U2, Y, W1, W2, V)
+        The first three tensors have shape ``(n, d_·)``,
+        the last four are column vectors ``(n, 1)``.
     """
-    # 1 Draw X, U1, U2
-    if Sigma_X is None:
-        X = np.random.standard_normal((n, d_x))
-    else:
-        X = np.random.multivariate_normal(np.zeros(d_x), Sigma_X, size=n)
+    device = utils.get_device() if device is None else device
 
-    if Sigma_U1 is None:
-        U1 = np.random.standard_normal((n, d_u1))
-    else:
-        U1 = np.random.multivariate_normal(np.zeros(d_u1), Sigma_U1, size=n)
+    # Parameters → tensors on target device
+    theta_star = _as_tensor(theta_star, device=device)
+    beta1_star = _as_tensor(beta1_star, device=device)
+    beta2_star = _as_tensor(beta2_star, device=device)
 
-    if Sigma_U2 is None:
-        U2 = np.random.standard_normal((n, d_u2))
-    else:
-        U2 = np.random.multivariate_normal(np.zeros(d_u2), Sigma_U2, size=n)
+    # 1) Latent covariates
+    X = _sample_mv(n, d_x, Sigma_X, device=device)
+    U1 = _sample_mv(n, d_u1, Sigma_U1, device=device)
+    U2 = _sample_mv(n, d_u2, Sigma_U2, device=device)
 
-    # 2 Independent noise ε
-    eps = np.random.normal(0.0, sigma_eps, size=n)
-    eps2 = np.random.normal(0.4, sigma_eps, size=n)
-    eps3 = np.random.normal(0.0, sigma_eps*2, size=n)
+    # 2) Independent Gaussian noise terms
+    eps = torch.randn(n, device=device) * sigma_eps
+    eps2 = torch.randn(n, device=device) * sigma_eps
+    eps3 = torch.randn(n, device=device) * (sigma_eps * 1.5)
 
-    # 3 Core quantities
-    X_theta   = X @ theta_star
-    U1_beta   = U1 @ beta1_star
-    U2_beta   = U2 @ beta2_star
+    # 3) Core linear parts
+    X_theta = X @ theta_star
+    U1_beta = U1 @ beta1_star
+    U2_beta = U2 @ beta2_star
 
     Y  = X_theta + U1_beta + U2_beta + eps
     W1 = X_theta + U1_beta + eps2
-    W2 = X_theta + U2_beta + eps3
+    W2 = X_theta + U1_beta + eps3
 
-    # 4 Preference label
-    V = (np.abs(W1 - Y) <= np.abs(W2 - Y)).astype(int)
+    # 4) Preference indicator
+    V = (torch.abs(W1 - Y) <= torch.abs(W2 - Y)).long()
 
-    # 5 Return column-vector shapes for outputs
+    # 5) Shape to column vectors
     return (
         X,
         U1,
         U2,
-        Y.reshape(-1, 1),
-        W1.reshape(-1, 1),
-        W2.reshape(-1, 1),
-        V.reshape(-1, 1),
+        Y.unsqueeze(1),
+        W1.unsqueeze(1),
+        W2.unsqueeze(1),
+        V.unsqueeze(1),
     )
+
+# ======================================================================
+# 2) MCAR missingness
+# ======================================================================
 
 
 def general_generate_mcar(
-    X,
-    Y,
-    W1,
-    W2,
-    V,
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    W1: torch.Tensor,
+    W2: torch.Tensor,
+    V: torch.Tensor,
     *,
-    alpha,         # (α1, α2, α3) — mandatory, must sum to 1
-):
+    alpha: Sequence[float],
+    device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, ...]:
     """
-    Impose MCAR missingness on (X, Y, W1, W2, V).
+    Impose MCAR missingness with probabilities (α₁, α₂, α₃):
 
-    Missingness patterns
-    --------------------
-    Pattern 1 (prob α₁):  no missing values  
-    Pattern 2 (prob α₂):  **Y** is missing  
-    Pattern 3 (prob α₃):  **Y** and **V** are missing  
-
-    Args
-    ----
-    X : ndarray of shape (n, d)
-        Feature matrix.
-    Y : ndarray of shape (n, 1)
-        Response vector as a column.
-    W1: ndarray of shape (n, 1)
-        First auxiliary model output (column vector).
-    W2: ndarray of shape (n, 1)
-        Second auxiliary model output (column vector).
-    V : ndarray of shape (n, 1)
-        Preference indicator in {0,1} (column vector).
-    alpha : ndarray or list/tuple of length 3
-        MCAR probabilities (α₁, α₂, α₃); must sum to 1.
-        *Randomness is driven by the global seed ``env.SEED``.*
-
-    Returns
-    -------
-    X_obs, Y_obs, W1_obs, W2_obs, V_obs : ndarrays
-        Observed versions of the variables, with `np.nan` where values
-        are missing.
-    R : ndarray (n,)
-        Missingness pattern vector taking values 1, 2, or 3.
+        Pattern 1 (α₁):  no values missing
+        Pattern 2 (α₂):  Y missing
+        Pattern 3 (α₃):  Y and V missing
     """
-    n = len(Y)
-    alpha_1, alpha_2, alpha_3 = alpha
+    device = X.device if device is None else device
+    alpha = torch.as_tensor(alpha, dtype=torch.float32, device=device)
+    if not torch.isclose(alpha.sum(), torch.tensor(1.0, device=device)):
+        raise ValueError("alpha must sum to 1")
 
-    # Draw pattern R ∈ {1,2,3}
-    R = np.random.choice([1, 2, 3], size=n, p=[alpha_1, alpha_2, alpha_3])
+    n = Y.shape[0]
 
-    # Create observed copies
-    X_obs  = X.copy()
-    Y_obs  = Y.astype(float).copy()
-    W1_obs = W1.copy()
-    W2_obs = W2.copy()
-    V_obs  = V.astype(float).copy()
+    # Draw missingness pattern R ∈ {1, 2, 3}
+    R = torch.multinomial(alpha, num_samples=n, replacement=True) + 1  # (n,)
+    R = R.unsqueeze(1)
 
-    # Apply missingness
-    Y_obs[R == 2] = np.nan                  # pattern-2: Y missing
-    Y_obs[R == 3] = np.nan                  # pattern-3: Y & V missing
-    V_obs[R == 3] = np.nan
+    # Clone observed copies (Y, V need float to hold NaNs)
+    X_obs  = X.clone()
+    Y_obs  = Y.clone().float()
+    W1_obs = W1.clone()
+    W2_obs = W2.clone()
+    V_obs  = V.clone().float()
+
+    # Apply masks
+    mask2 = R == 2
+    mask3 = R == 3
+    Y_obs[mask2] = torch.nan
+    Y_obs[mask3] = torch.nan
+    V_obs[mask3] = torch.nan
 
     return X_obs, Y_obs, W1_obs, W2_obs, V_obs, R
+
+# ======================================================================
+# 3) Wrapper: complete data + MCAR
+# ======================================================================
 
 
 def lm_generate_obs_data_mcar(
@@ -158,47 +178,36 @@ def lm_generate_obs_data_mcar(
     d_x: int,
     d_u1: int,
     d_u2: int,
-    theta_star: np.ndarray,
-    beta1_star: np.ndarray,
-    beta2_star: np.ndarray,
+    theta_star,
+    beta1_star,
+    beta2_star,
     *,
-    alpha,                          # (α1, α2, α3) — required
-    Sigma_X:  np.ndarray | None = None,
-    Sigma_U1: np.ndarray | None = None,
-    Sigma_U2: np.ndarray | None = None,
+    alpha: Sequence[float],
+    Sigma_X: Optional[torch.Tensor] = None,
+    Sigma_U1: Optional[torch.Tensor] = None,
+    Sigma_U2: Optional[torch.Tensor] = None,
     sigma_eps: float = 1.0,
-):
+    device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, ...]:
     """
-    Generate observed data under MCAR for the Gaussian linear-mixture model.
-
-    Steps
-    -----
-    1. Call ``lm_generate_complete_data`` to obtain full data.
-    2. Apply MCAR mechanism via ``general_generate_mcar``.
-    3. Return only the observed quantities and the missingness mask.
-
-    Returns
-    -------
-    X_obs, Y_obs, W1_obs, W2_obs, V_obs, R
-        Shapes: X_obs (n, d_x), Y_obs/W1_obs/W2_obs/V_obs (n,1), R (n, q)
-        where q is the total number of variables subject to missingness.
+    Convenience wrapper: draw complete data and immediately impose MCAR.
     """
-    # ---------- Step 1: simulate complete data ----------
+    device = utils.get_device() if device is None else device
+
+    # 1) Complete data
     X, U1, U2, Y, W1, W2, V = lm_generate_complete_data(
-        n,
-        d_x, d_u1, d_u2,
+        n, d_x, d_u1, d_u2,
         theta_star, beta1_star, beta2_star,
         Sigma_X=Sigma_X,
         Sigma_U1=Sigma_U1,
         Sigma_U2=Sigma_U2,
-        sigma_eps=sigma_eps
+        sigma_eps=sigma_eps,
+        device=device,
     )
 
-    # ---------- Step 2: impose MCAR missingness ----------
-    X_obs, Y_obs, W1_obs, W2_obs, V_obs, R = general_generate_mcar(
+    # 2) Apply MCAR
+    return general_generate_mcar(
         X, Y, W1, W2, V,
-        alpha=np.asarray(alpha)
+        alpha=alpha,
+        device=device,
     )
-
-    # ---------- Step 3: return ----------
-    return X_obs, Y_obs, W1_obs, W2_obs, V_obs, R

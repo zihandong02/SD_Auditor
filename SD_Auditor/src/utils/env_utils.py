@@ -1,116 +1,118 @@
-import os, random, numpy as np
-import json
+# ── standard library ───────────────────────────────────────────────────
 import datetime
-from typing import Dict, Any
-import pandas as pd
+import json
+import os
+import random
+from typing import Any, Dict, TYPE_CHECKING
 
-SEED = 2  # default global seed (will be updated by set_global_seed)
+# ── third-party libraries ──────────────────────────────────────────────
+import torch
 
-def set_global_seed(seed: int | None = None):
+try:
+    import numpy as np                              # optional dependency
+    HAS_NUMPY: bool = True
+except ImportError:                                # NumPy not installed
+    np = None                                       # type: ignore[assignment]
+    HAS_NUMPY = False
+
+# For static type checkers: let them know 'np' exists
+if TYPE_CHECKING:                                   # noqa: F401
+    import numpy as np  # pragma: no cover
+
+# ----------------------------------------------------------------------
+SEED: int = 2                     # Global default seed (can be overwritten)
+
+# ----------------------------------------------------------------------
+def set_global_seed(seed: int | None = None) -> None:
     """
-    Set all RNG seeds and synchronously update the module-level SEED.
-
-    Parameters
-    ----------
-    seed : int or None
-        New seed value; if None, reuse the current env_utils.SEED.
+    Set the global random seed for Python, Torch (CPU & CUDA) and
+    optionally NumPy.  Also configures cuDNN for deterministic behaviour.
     """
     global SEED
-    if seed is None:
-        seed = SEED          # keep existing default
-    else:
-        SEED = seed          # update the global constant
+    seed = SEED if seed is None else seed
+    SEED = seed
 
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
-    np.random.seed(seed)
-    
-    # Uncomment if using PyTorch
-    # try:
-    #     import torch
-    #     torch.manual_seed(seed)
-    #     torch.cuda.manual_seed_all(seed)
-    #     torch.backends.cudnn.deterministic = True
-    #     torch.backends.cudnn.benchmark = False
-    # except ImportError:
-    #     pass
 
-def get_device():
-    # Uncomment if using PyTorch
-    # try:
-    #     import torch
-    #     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # except ImportError:
-    #     return "cpu"
-    
-    return "cpu"
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-# ---------------------------------------------------------------------
+    if np is not None:
+        np.random.seed(seed)
+
+# ----------------------------------------------------------------------
+def get_device(device_id: int | None = None) -> torch.device:
+    """
+    Return the preferred computation device.
+    If `device_id` is provided and CUDA is available, it will select
+    'cuda:<device_id>'. Otherwise, it defaults to 'cuda' if available,
+    or 'cpu'.
+    """
+    if torch.cuda.is_available():
+        if device_id is not None:
+            return torch.device(f"cuda:{device_id}")
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+# ----------------------------------------------------------------------
+# ------------------------------- I/O ----------------------------------
+# ----------------------------------------------------------------------
 def _to_json(obj: Any):
     """
-    Fallback function for json.dump.
-
-    Converts numpy scalars / ndarrays into native Python types
-    so that the whole parameter dictionary can be written as JSON.
+    Fallback serializer for json.dump that understands Torch / NumPy
+    objects and converts them to native Python types.
     """
-    if isinstance(obj, np.ndarray):                       # array -> list
-        return obj.tolist()
-    if isinstance(obj, (np.integer, np.int_)):            # np.int64 -> int
+    # Torch tensors & scalars
+    if torch.is_tensor(obj):
+        return obj.detach().cpu().tolist()
+    if isinstance(obj, (torch.int8, torch.int16, torch.int32, torch.int64,
+                        torch.uint8, torch.bool)):
         return int(obj)
-    if isinstance(obj, (np.floating, np.float_)):         # np.float64 -> float
+    if isinstance(obj, (torch.float16, torch.float32, torch.float64)):
         return float(obj)
-    return str(obj)                                       # anything else -> str
 
+    # NumPy arrays & scalars
+    if np is not None:
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer, np.int_)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float_)):
+            return float(obj)
 
-# ---------------------------------------------------------------------
-# public helper: save run summary + parameters
-# ---------------------------------------------------------------------
+    # Fallback: stringify everything else
+    return str(obj)
+
+# ----------------------------------------------------------------------
 def dump_run_simple(
     *,
-    df: pd.DataFrame,
+    df,                           # pandas.DataFrame
     params: Dict[str, Any],
     base_dir: str = "results",
     prefix: str = "",
 ) -> str:
     """
-    Persist one experimental run **without** generating figures.
-
-    Creates a timestamped directory:
-        results/<prefix>_<YYYYMMDD_HHMMSS>/
-
-    Inside the folder it writes:
-        • summary.csv   – machine-readable table
-        • summary.txt   – pretty-printed table
-        • params.json   – all hyper-parameters used for the run
-
-    Parameters
-    ----------
-    df      : pandas.DataFrame
-        Aggregated metrics (indexed by τ).
-    params  : dict
-        Dict holding everything needed to reproduce the run
-        (e.g. {"tau_values": [...], "common_args": {...}}).
-    base_dir : str, optional
-        Top-level directory that will hold all runs.
-    prefix   : str, optional
-        Prefix for the timestamped subfolder.
-
-    Returns
-    -------
-    out_dir : str
-        Absolute path to the folder that was created.
+    Save a single experiment run (no figures):
+        results/<prefix>_<timestamp>/
+            summary.csv   – machine-readable table
+            summary.txt   – pretty-printed table
+            params.json   – full hyper-parameter dictionary
+    Returns the absolute path to the created folder.
     """
-    # ---------- 1. construct timestamped subfolder -------------------
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(base_dir, f"{prefix}_{timestamp}")
-    os.makedirs(out_dir, exist_ok=True)          # create parent dirs if needed
+    import pandas as pd           # Lazy import to avoid hard dependency
+    assert isinstance(df, pd.DataFrame), "`df` must be a pandas.DataFrame"
 
-    # ---------- 2. save summary table --------------------------------
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir  = os.path.join(base_dir, f"{prefix}_{timestamp}")
+    os.makedirs(out_dir, exist_ok=True)
+
     df.to_csv(os.path.join(out_dir, "summary.csv"), index=True)
     with open(os.path.join(out_dir, "summary.txt"), "w", encoding="utf-8") as f_txt:
         f_txt.write(df.to_string())
 
-    # ---------- 3. save full parameter dictionary --------------------
     with open(os.path.join(out_dir, "params.json"), "w", encoding="utf-8") as f_json:
         json.dump(params, f_json, indent=4, default=_to_json)
 

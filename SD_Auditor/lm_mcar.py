@@ -1,238 +1,201 @@
-import os, sys, numpy as np, pandas as pd
-import datetime, json
-from tqdm import tqdm
-import matplotlib.pyplot as plt
+"""
+main.py
+-------
+Run the MCAR mono-debias experiment (Torch).
+
+Usage
+-----
+# auto device (GPU if available), default settings
+python main.py
+
+# force CPU, 5 repetitions, tau = 2,3,5
+python main.py --device cpu --reps 5 --tau_vals 2,3,5
+"""
+
+# ── stdlib ────────────────────────────────────────────────────────────
+import argparse, datetime, os, sys
 from pathlib import Path
-from statsmodels.stats.weightstats import _zconfint_generic, _zstat_generic
+from cProfile import Profile
+from pstats  import Stats, SortKey
+from typing  import List
 
-sys.path.append(os.path.abspath(".."))
+# ── third‑party ───────────────────────────────────────────────────────
+import torch
+import torch.distributed as dist
+import matplotlib.pyplot as plt
+import pandas as pd
+# ── internal packages ────────────────────────────────────────────────
+sys.path.append(os.path.abspath(".."))  # adjust if needed
 
-# internal modules (from your src/ package)
-from src.utils           import SEED, set_global_seed, dump_run_simple
-from src.data_generation import lm_generate_obs_data_mcar
-from src.mono_debais     import (
-    lm_mono_debias_estimate_mcar_crossfit,
-    lm_mono_debias_budget_constrained_obtain_alpha_mcar,
-    lm_mono_debias_budget_constrained_obtain_alpha_mcar_var1
-)
-from src.baselines       import lm_ols_estimate
-# ------------------------------------------------------------
-# argument parser
-# ------------------------------------------------------------
+from src.utils      import set_global_seed, get_device, dump_run_simple
+from src.mono_debias import lm_mcar                       # Algorithm‑1 wrapper
 
-# ------------------- 1. Global settings -------------------
-SEED = 42
-set_global_seed(SEED)           # Your own helper that sets both NumPy & Python RNG
+# =====================================================================
+# CLI
+# =====================================================================
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser("MCAR mono-debias experiment (Torch, single-process)")
 
-
-
-
-def lm_mcar(
-    *,
-    # ----------------  batch sizes ----------------
-    n1: int,
-    n2: int,
-    reps: int,
-    # ----------------  model dims -----------------
-    d_x: int,
-    d_u1: int,
-    d_u2: int,
-    # ----------------  model parameters -----------
-    theta_star: np.ndarray,
-    beta1_star: np.ndarray,
-    beta2_star: np.ndarray,
-    # ----------------  noise ----------------------
-    sigma_eps: float,
-    # ----------------  MCAR / CI ------------------
-    alpha_level: float,
-    tau: float,
-    c: float,
-    alpha_init: np.ndarray,
-    # ----------------  misc -----------------------
-    seed: int = 42
-) -> dict:
-    """
-    Full Stage-1 + Stage-2 MCAR pipeline.
-
-    Returns
-    -------
-    dict with
-        alpha_opt, trace_opt
-        mean_l2_opt / base / ols
-        mean_len_opt / base
-        covg_opt / base
-    """
-    # -------------- Stage-1 : choose α* --------------------
-    set_global_seed(seed)
-
-    X1, Y1, W1_1, W2_1, V1, R1 = lm_generate_obs_data_mcar(
-        n=n1,
-        d_x=d_x, d_u1=d_u1, d_u2=d_u2,
-        theta_star=theta_star,
-        beta1_star=beta1_star,
-        beta2_star=beta2_star,
-        alpha=alpha_init,
-        Sigma_X=None, Sigma_U1=None, Sigma_U2=None,
-        sigma_eps=sigma_eps,
+    # ---------- device & RNG ----------
+    parser.add_argument(
+        "--device", default="auto",
+        help="'auto' = src.utils.get_device(); otherwise pass 'cpu', 'cuda', 'cuda:1', …",
     )
+    parser.add_argument("--seed", default=42, type=int)
 
-    alpha_opt, trace_opt, _ = lm_mono_debias_budget_constrained_obtain_alpha_mcar_var1(
-        X1, Y1, W1_1, W2_1, V1, R1,
-        tau=tau, c=c, method="mlp"
+    # ---------- distributed ----------
+    parser.add_argument("--distributed", action="store_true",
+                        help="Enable torch.distributed (use with torchrun or multiple GPUs)")
+
+    # ---------- batch sizes & repetitions ----------
+    parser.add_argument("--n1",   default=2000,  type=int)
+    parser.add_argument("--n2",   default=10000, type=int)
+    parser.add_argument("--reps", default=100,    type=int)
+
+    # ---------- dimensions ----------
+    parser.add_argument("--d_x",  default=5, type=int)
+    parser.add_argument("--d_u1", default=5, type=int)
+    parser.add_argument("--d_u2", default=5, type=int)
+
+    # ---------- noise ----------
+    parser.add_argument("--sigma_eps", default=1.0, type=float)
+
+    # ---------- MCAR / CI parameters ----------
+    parser.add_argument("--alpha_level", default=0.10, type=float)
+    parser.add_argument("--tau_vals",    default="2",
+                        help="comma‑separated list, e.g. '3,4,5'")
+    parser.add_argument("--c",           default=10.0,  type=float)
+    parser.add_argument("--alpha_init",  default="0.4,0.3,0.3")
+
+    return parser.parse_args()
+
+# =====================================================================
+# experiment runner (works in single‑ or multi‑process mode)
+# =====================================================================
+
+def run_experiment(args: argparse.Namespace, rank: int = 0, world_size: int = 1):
+    # ---------- device selection ----------
+    if args.device == "auto":
+        device = get_device(rank if torch.cuda.is_available() else None)
+    else:
+        device = torch.device(args.device)
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
+
+    if rank == 0:
+        print(f"[INFO] using device: {device}; rank {rank}/{world_size}")
+
+    set_global_seed(args.seed + rank)  # different seed per rank for diversity
+
+    # ---------- ground‑truth parameters ----------
+    theta_star = torch.arange(1, args.d_x  + 1, device=device, dtype=torch.float32) * 0.2
+    beta1_star = torch.arange(1, args.d_u1 + 1, device=device, dtype=torch.float32) * 0.2
+    beta2_star = torch.arange(1, args.d_u2 + 1, device=device, dtype=torch.float32) * 1.0
+    alpha_init = torch.tensor(
+        [float(x) for x in args.alpha_init.split(",")],
+        device=device,
     )
+    tau_values: List[float] = [float(t) for t in args.tau_vals.split(",")]
 
-    # baseline α with α₂ = 0
-    alpha1_base   = tau / c
-    alpha_baseline = np.array([alpha1_base,
-                               0.0,
-                               1.0 + (c - 1.0) * alpha1_base - tau])
-
-    # -------------- Stage-2 metrics containers --------------
-    err_opt, err_base, err_ols = [], [], []
-    len_opt, len_base          = [], []
-    cov_opt, cov_base          = [], []
-
-    for rep in range(reps):
-        set_global_seed(seed + rep)
-
-        # ----- Batch-A : α_opt ---------------------------------------
-        X2A, Y2A, W1A, W2A, V2A, R2A = lm_generate_obs_data_mcar(
-            n=n2,
-            d_x=d_x, d_u1=d_u1, d_u2=d_u2,
+    # partition τ values across ranks -------------------------
+    tau_slice = tau_values[rank::world_size]
+    print(f"[rank {rank}] gpu={device} will run tau_slice={tau_slice}", flush=True)
+    rows_local = []
+    for tau in tau_slice:
+        res = lm_mcar(
+            n1=args.n1, n2=args.n2, reps=args.reps,
+            d_x=args.d_x, d_u1=args.d_u1, d_u2=args.d_u2,
             theta_star=theta_star,
             beta1_star=beta1_star,
             beta2_star=beta2_star,
-            alpha=alpha_opt,
-            Sigma_X=None, Sigma_U1=None, Sigma_U2=None,
-            sigma_eps=sigma_eps,
+            sigma_eps=args.sigma_eps,
+            alpha_level=args.alpha_level,
+            tau=tau, c=args.c,
+            alpha_init=alpha_init,
+            seed=args.seed,  # offset to keep randomness disjoint
         )
-        theta_opt, cov_opt_mat = lm_mono_debias_estimate_mcar_crossfit(
-            X2A, Y2A, W1A, W2A, V2A, R2A,
-            alpha=alpha_opt, method="mlp"
-        )
-        theta_opt  = np.asarray(theta_opt)
-        cov_opt_mat = np.asarray(cov_opt_mat)
-        se_opt_1 = np.sqrt(cov_opt_mat[0, 0] / n2)
-        ci_opt_low, ci_opt_high = _zconfint_generic(
-            theta_opt[0], se_opt_1,
-            alpha=alpha_level, alternative="two-sided"
-        )
+        res["tau"] = tau
+        rows_local.append(res)
+        if rank == 0:
+            print(f"[rank 0] finished τ={tau}")
 
-        # ----- Batch-B : α_baseline ------------------------------
-        X2B, Y2B, W1B, W2B, V2B, R2B = lm_generate_obs_data_mcar(
-            n=n2,
-            d_x=d_x, d_u1=d_u1, d_u2=d_u2,
-            theta_star=theta_star,
-            beta1_star=beta1_star,
-            beta2_star=beta2_star,
-            alpha=alpha_baseline,
-            Sigma_X=None, Sigma_U1=None, Sigma_U2=None,
-            sigma_eps=sigma_eps,
-        )
-        theta_base, cov_base_mat = lm_mono_debias_estimate_mcar_crossfit(
-            X2B, Y2B, W1B, W2B, V2B, R2B,
-            alpha=alpha_baseline, method="mlp"
-        )
-        theta_base  = np.asarray(theta_base)
-        cov_base_mat = np.asarray(cov_base_mat)
-        se_base_1 = np.sqrt(cov_base_mat[0, 0] / n2)
-        ci_base_low, ci_base_high = _zconfint_generic(
-            theta_base[0], se_base_1,
-            alpha=alpha_level, alternative="two-sided"
-        )
+    # ---------------- gather results -------------------------
+    if world_size > 1:
+        gathered: List[List[dict]] = [None for _ in range(world_size)]  # type: ignore
+        dist.all_gather_object(gathered, rows_local)
+        if rank == 0:
+            rows = [item for sublist in gathered for item in sublist]
+    else:
+        rows = rows_local
 
-        # ----- OLS reference ------------------------------------
-        theta_ols = lm_ols_estimate(X2B, Y2B)
+    # ---------------- rank‑0: save & plot ---------------------
+    if rank == 0:
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        df = pd.DataFrame(rows).set_index("tau").round(4).sort_index()
+        print(df)
 
-        # ----- accumulate metrics ------------------------------
-        err_opt .append(np.linalg.norm(theta_opt  - theta_star))
-        err_base.append(np.linalg.norm(theta_base - theta_star))
-        err_ols .append(np.linalg.norm(theta_ols  - theta_star))
+        # save summary + params --------------------------------
+        params = {
+            "cmd": " ".join(sys.argv),
+            "args": vars(args),
+            "timestamp": datetime.datetime.now().isoformat(),
+        }
+        out_dir = dump_run_simple(df=df, params=params)
+        print(f"[INFO] results saved to {out_dir}")
 
-        len_opt .append(ci_opt_high  - ci_opt_low)
-        len_base.append(ci_base_high - ci_base_low)
+        # plots -------------------------------------------------
+        plt.figure(figsize=(7, 3.5))
+        plt.plot(df.index, df["mean_len_opt"],  "o-", label="opt-alpha")
+        plt.plot(df.index, df["mean_len_base"], "o-", label="base-alpha")
+        plt.plot(df.index, df["mean_len_ols"], "o-", label="ols")
+        plt.xlabel(r"$tau$"); plt.ylabel("CI length (θ₁)")
+        plt.legend(); plt.tight_layout()
+        plt.savefig(Path(out_dir) / "ci_length_vs_tau.pdf"); plt.close()
 
-        cov_opt .append(int(ci_opt_low  <= theta_star[0] <= ci_opt_high))
-        cov_base.append(int(ci_base_low <= theta_star[0] <= ci_base_high))
+        plt.figure(figsize=(7, 3.5))
+        plt.plot(df.index, df["covg_opt"],  "o-", label="opt-alpha")
+        plt.plot(df.index, df["covg_base"], "o-", label="base-alpha")
+        plt.plot(df.index, df["covg_ols"], "o-", label="ols")
+        plt.axhline(1 - args.alpha_level, ls="--", color="gray")
+        plt.ylim(0.5, 1.05)
+        plt.xlabel(r"$tau$"); plt.ylabel("Coverage (θ₁)")
+        plt.legend(); plt.tight_layout()
+        plt.savefig(Path(out_dir) / "coverage_vs_tau.pdf"); plt.close()
 
-    # ---------------- aggregate & return ---------------------
-    return dict(
-        alpha_opt=np.round(alpha_opt, 4),
-        trace_opt=trace_opt,
-        mean_l2_opt=np.mean(err_opt),
-        mean_l2_base=np.mean(err_base),
-        mean_l2_ols=np.mean(err_ols),
-        mean_len_opt=np.mean(len_opt),
-        mean_len_base=np.mean(len_base),
-        covg_opt=np.mean(cov_opt),
-        covg_base=np.mean(cov_base),
+# =====================================================================
+# entry‑point (with optional distributed / profiler)
+# =====================================================================
+
+def main():
+    args = parse_args()
+
+    # ------------- distributed initialisation -------------
+    distributed = args.distributed or (
+        "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1
     )
+    if distributed:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        local_rank = int(os.environ.get("LOCAL_RANK", rank))
+        torch.cuda.set_device(local_rank) if torch.cuda.is_available() else None
+    else:
+        rank = 0
+        world_size = 1
 
+    prof = Profile(); prof.enable()
+    run_experiment(args, rank=rank, world_size=world_size)
+    prof.disable()
 
+    if rank == 0:
+        Stats(prof).strip_dirs().sort_stats(SortKey.CUMULATIVE).print_stats(25)
 
+    if distributed:
+        dist.barrier()
+        dist.destroy_process_group()
 
-
-# 1) Define the grid of τ values you want to explore
-tau_values = [2.0, 3.0, 4.0]
-
-
-d_x = 5
-d_u1 = 5
-d_u2 = 5
-common = dict(
-    n1=2000, n2=10000, reps=10,
-    d_x=d_x, d_u1=d_u1, d_u2=d_u2,
-    theta_star = np.arange(1, d_x  + 1) * 0.2,   # length d_x
-    beta1_star = np.arange(1, d_u1 + 1) * 1.0,   # length d_u1
-    beta2_star = np.arange(1, d_u2 + 1) * -0.4,  # length d_u2
-    sigma_eps = 1.0,
-    alpha_level = 0.1,
-    c = 6.0,
-    alpha_init = np.array([1/3, 1/3, 1/3])
-)
-
-# ------------------------------------------------------------------
-# 1)  run lm_mcar for each τ  →  build DataFrame `df`
-# ------------------------------------------------------------------
-rows = []
-for τ in tau_values:
-    res = lm_mcar(tau=τ, **common)          # type: ignore[arg-type]
-    res["tau"] = τ
-    rows.append(res)
-
-df = pd.DataFrame(rows).set_index("tau").round(4)
-
-# ------------------------------------------------------------------
-# 2)  save summary + parameters, capture returned folder
-# ------------------------------------------------------------------
-params   = {"tau_values": tau_values, "common_args": common}
-time_dir = dump_run_simple(df=df, params=params)     # ← returns out-dir path
-
-# ------------------------------------------------------------------
-# 3)  Figure: CI length vs τ   (stored inside the same folder)
-# ------------------------------------------------------------------
-plt.figure(figsize=(7, 3.5))
-plt.plot(df.index, df["mean_len_opt"],  marker="o", label="opt-alpha")
-plt.plot(df.index, df["mean_len_base"], marker="o", label="base-alpha")
-plt.xlabel(r"$\tau$")
-plt.ylabel("CI length (first coord)")
-plt.legend()
-plt.tight_layout()
-plt.savefig(os.path.join(time_dir, "ci_length_vs_tau.pdf"))
-plt.close()
-
-# ------------------------------------------------------------------
-# 4)  Figure: Coverage vs τ    (stored inside the same folder)
-# ------------------------------------------------------------------
-plt.figure(figsize=(7, 3.5))
-plt.plot(df.index, df["covg_opt"],  marker="o", label="opt-alpha")
-plt.plot(df.index, df["covg_base"], marker="o", label="base-alpha")
-plt.axhline(1 - common["alpha_level"], ls="--", color="gray")   # nominal level
-plt.ylim(0.5, 1.05)
-plt.xlabel(r"$\tau$")
-plt.ylabel("Coverage (first coord)")
-plt.legend()
-plt.tight_layout()
-plt.savefig(os.path.join(time_dir, "coverage_vs_tau.pdf"))
-plt.close()
+if __name__ == "__main__":
+    main()
