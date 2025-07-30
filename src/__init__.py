@@ -2,6 +2,7 @@
 from .data_generation import (
     lm_generate_complete_data,
     lm_generate_obs_data_mcar,
+    lm_generate_obs_data_mar
 )
 
 # ── mono-debias estimators ────────────────────────────────────────────
@@ -13,6 +14,7 @@ from .mono_debias import (
 __all__ = [
     "lm_generate_complete_data",
     "lm_generate_obs_data_mcar",
+    "lm_generate_obs_data_mar",
     "lm_mono_debias_estimate_mcar_crossfit",
     "lm_mcar",
 ]
