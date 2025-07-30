@@ -28,7 +28,7 @@ import pandas as pd
 sys.path.append(os.path.abspath(".."))  # adjust if needed
 
 from src.utils      import set_global_seed, get_device, dump_run_simple
-from src.mono_debias import lm_mcar                       # Algorithm‑1 wrapper
+from src.mono_debias import lm_mcar, lm_mcar_extended                       # Algorithm‑1 wrapper
 
 # =====================================================================
 # CLI
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
         "--device", default="auto",
         help="'auto' = src.utils.get_device(); otherwise pass 'cpu', 'cuda', 'cuda:1', …",
     )
-    parser.add_argument("--seed", default=42, type=int)
+    parser.add_argument("--seed", default=4, type=int)
 
     # ---------- distributed ----------
     parser.add_argument("--distributed", action="store_true",
@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     # ---------- batch sizes & repetitions ----------
     parser.add_argument("--n1",   default=2000,  type=int)
     parser.add_argument("--n2",   default=10000, type=int)
-    parser.add_argument("--reps", default=100,    type=int)
+    parser.add_argument("--reps", default=5,    type=int)
 
     # ---------- dimensions ----------
     parser.add_argument("--d_x",  default=5, type=int)
@@ -59,14 +59,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--d_u2", default=5, type=int)
 
     # ---------- noise ----------
-    parser.add_argument("--sigma_eps", default=1.0, type=float)
+    parser.add_argument("--sigma_eps", default=2.0, type=float)
 
     # ---------- MCAR / CI parameters ----------
     parser.add_argument("--alpha_level", default=0.10, type=float)
-    parser.add_argument("--tau_vals",    default="2",
+    parser.add_argument("--tau_vals",    default="3",
                         help="comma‑separated list, e.g. '3,4,5'")
     parser.add_argument("--c",           default=10.0,  type=float)
-    parser.add_argument("--alpha_init",  default="0.4,0.3,0.3")
+    parser.add_argument("--alpha_init",  default="0.5,0.2,0.3")
 
     return parser.parse_args()
 
@@ -90,8 +90,8 @@ def run_experiment(args: argparse.Namespace, rank: int = 0, world_size: int = 1)
 
     # ---------- ground‑truth parameters ----------
     theta_star = torch.arange(1, args.d_x  + 1, device=device, dtype=torch.float32) * 0.2
-    beta1_star = torch.arange(1, args.d_u1 + 1, device=device, dtype=torch.float32) * 0.2
-    beta2_star = torch.arange(1, args.d_u2 + 1, device=device, dtype=torch.float32) * 1.0
+    beta1_star = torch.arange(1, args.d_u1 + 1, device=device, dtype=torch.float32) * 0.3
+    beta2_star = torch.arange(1, args.d_u2 + 1, device=device, dtype=torch.float32) * 0.5
     alpha_init = torch.tensor(
         [float(x) for x in args.alpha_init.split(",")],
         device=device,
@@ -131,8 +131,6 @@ def run_experiment(args: argparse.Namespace, rank: int = 0, world_size: int = 1)
 
     # ---------------- rank‑0: save & plot ---------------------
     if rank == 0:
-        import pandas as pd
-        import matplotlib.pyplot as plt
         df = pd.DataFrame(rows).set_index("tau").round(4).sort_index()
         print(df)
 
@@ -144,25 +142,6 @@ def run_experiment(args: argparse.Namespace, rank: int = 0, world_size: int = 1)
         }
         out_dir = dump_run_simple(df=df, params=params)
         print(f"[INFO] results saved to {out_dir}")
-
-        # plots -------------------------------------------------
-        plt.figure(figsize=(7, 3.5))
-        plt.plot(df.index, df["mean_len_opt"],  "o-", label="opt-alpha")
-        plt.plot(df.index, df["mean_len_base"], "o-", label="base-alpha")
-        plt.plot(df.index, df["mean_len_ols"], "o-", label="ols")
-        plt.xlabel(r"$tau$"); plt.ylabel("CI length (θ₁)")
-        plt.legend(); plt.tight_layout()
-        plt.savefig(Path(out_dir) / "ci_length_vs_tau.pdf"); plt.close()
-
-        plt.figure(figsize=(7, 3.5))
-        plt.plot(df.index, df["covg_opt"],  "o-", label="opt-alpha")
-        plt.plot(df.index, df["covg_base"], "o-", label="base-alpha")
-        plt.plot(df.index, df["covg_ols"], "o-", label="ols")
-        plt.axhline(1 - args.alpha_level, ls="--", color="gray")
-        plt.ylim(0.5, 1.05)
-        plt.xlabel(r"$tau$"); plt.ylabel("Coverage (θ₁)")
-        plt.legend(); plt.tight_layout()
-        plt.savefig(Path(out_dir) / "coverage_vs_tau.pdf"); plt.close()
 
 # =====================================================================
 # entry‑point (with optional distributed / profiler)

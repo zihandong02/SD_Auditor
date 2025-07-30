@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, Callable
+from typing import Dict, Tuple, Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -53,6 +53,52 @@ class LogisticReg(nn.Module):
 
     def forward(self, x):
         return self.w(x)
+    
+
+class AlphaModel(nn.Module):
+    """
+    Multiclass logistic regression with optional one hidden layer.
+    If hidden_dim is None, it's just a single linear→softmax.
+    Otherwise: input → Linear(hidden_dim) → ReLU → Linear(3) → softmax.
+    """
+    def __init__(self,
+                 dim_x: int,
+                 dim_w1: int,
+                 dim_w2: int,
+                 hidden_dim: Optional[int] = None):
+        super().__init__()
+        input_dim = dim_x + dim_w1 + dim_w2
+
+        self.use_hidden = hidden_dim is not None
+        if self.use_hidden:
+            # hidden layer + output layer
+            self.hidden = nn.Linear(input_dim, hidden_dim, bias=True)
+            self.activation = nn.ReLU()
+            self.output  = nn.Linear(hidden_dim, 3,      bias=True)
+        else:
+            # single linear layer to 3 logits
+            self.linear = nn.Linear(input_dim, 3, bias=True)
+
+    def forward(self,
+                X: torch.Tensor,   # (batch_size, dim_x)
+                W1: torch.Tensor,  # (batch_size, dim_w1)
+                W2: torch.Tensor   # (batch_size, dim_w2)
+               ) -> torch.Tensor:  # returns (batch_size, 3)
+        # 1) concatenate inputs
+        H = torch.cat([X, W1, W2], dim=1)  # (batch, input_dim)
+
+        if self.use_hidden:
+            # 2a) hidden projection + nonlinearity
+            H = self.activation(self.hidden(H))  # (batch, hidden_dim)
+            # 3a) project to 3 logits
+            logits = self.output(H)              # (batch, 3)
+        else:
+            # 2b) directly project to 3 logits
+            logits = self.linear(H)              # (batch, 3)
+
+        # 4) softmax → probabilities summing to 1
+        alpha = torch.softmax(logits, dim=1)     # (batch, 3)
+        return alpha
 
 # ----------------------------------------------------------------------
 # 2) Registry & helpers
