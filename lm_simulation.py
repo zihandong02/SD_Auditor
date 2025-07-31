@@ -28,7 +28,7 @@ import pandas as pd
 sys.path.append(os.path.abspath(".."))  # adjust if needed
 
 from src.utils      import set_global_seed, get_device, dump_run_simple
-from src.mono_debias import lm_mcar, lm_mcar_extended                       # Algorithm‑1 wrapper
+from src.mono_debias import lm_fix_alpha, lm_change_alpha_every_iter, lm_mcar_extended  # Algorithm‑1 wrapper
 
 # =====================================================================
 # CLI
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
         "--device", default="auto",
         help="'auto' = src.utils.get_device(); otherwise pass 'cpu', 'cuda', 'cuda:1', …",
     )
-    parser.add_argument("--seed", default=4, type=int)
+    parser.add_argument("--seed", default=42, type=int)
 
     # ---------- distributed ----------
     parser.add_argument("--distributed", action="store_true",
@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     # ---------- batch sizes & repetitions ----------
     parser.add_argument("--n1",   default=2000,  type=int)
     parser.add_argument("--n2",   default=10000, type=int)
-    parser.add_argument("--reps", default=5,    type=int)
+    parser.add_argument("--reps", default=3,    type=int)
 
     # ---------- dimensions ----------
     parser.add_argument("--d_x",  default=5, type=int)
@@ -90,8 +90,8 @@ def run_experiment(args: argparse.Namespace, rank: int = 0, world_size: int = 1)
 
     # ---------- ground‑truth parameters ----------
     theta_star = torch.arange(1, args.d_x  + 1, device=device, dtype=torch.float32) * 0.2
-    beta1_star = torch.arange(1, args.d_u1 + 1, device=device, dtype=torch.float32) * 0.3
-    beta2_star = torch.arange(1, args.d_u2 + 1, device=device, dtype=torch.float32) * 0.5
+    beta1_star = torch.arange(1, args.d_u1 + 1, device=device, dtype=torch.float32) * 0.2
+    beta2_star = torch.arange(1, args.d_u2 + 1, device=device, dtype=torch.float32)
     alpha_init = torch.tensor(
         [float(x) for x in args.alpha_init.split(",")],
         device=device,
@@ -103,7 +103,7 @@ def run_experiment(args: argparse.Namespace, rank: int = 0, world_size: int = 1)
     print(f"[rank {rank}] gpu={device} will run tau_slice={tau_slice}", flush=True)
     rows_local = []
     for tau in tau_slice:
-        res = lm_mcar(
+        res = lm_fix_alpha(
             n1=args.n1, n2=args.n2, reps=args.reps,
             d_x=args.d_x, d_u1=args.d_u1, d_u2=args.d_u2,
             theta_star=theta_star,
