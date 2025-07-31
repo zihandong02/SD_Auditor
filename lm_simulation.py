@@ -49,8 +49,8 @@ def parse_args() -> argparse.Namespace:
                         help="Enable torch.distributed (use with torchrun or multiple GPUs)")
 
     # ---------- batch sizes & repetitions ----------
-    parser.add_argument("--n1",   default=2000,  type=int)
-    parser.add_argument("--n2",   default=10000, type=int)
+    parser.add_argument("--n1",   default=5000,  type=int)
+    parser.add_argument("--n2",   default=50000, type=int)
     parser.add_argument("--reps", default=3,    type=int)
 
     # ---------- dimensions ----------

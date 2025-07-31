@@ -22,6 +22,8 @@ from torch.distributions import Normal
 from tqdm import tqdm
 import math
 
+from typeguard import value
+
 from .utils import (
     get_device, set_global_seed, sample_split, wald_ci         # <-- our helpers
 )
@@ -108,10 +110,10 @@ def lm_mono_debias_estimate_mcar_crossfit(
 
         # ----- Step 2 : build ψ and φ on D3 ∩ {R = 1} -----
         mask_r1_D3 = (R3 == 1).squeeze(1)
-        theta_pre = lm_fit_wls(
+        # print(alpha)
+        theta_pre = lm_fit_ols(
             X3[mask_r1_D3],
             Y3[mask_r1_D3])
-
         psi_1, psi_2, psi_3 = lm_build_all_psi(
             X3[mask_r1_D3], Y3[mask_r1_D3],
             W13[mask_r1_D3], W23[mask_r1_D3], V3[mask_r1_D3],
@@ -441,9 +443,9 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mar_cov00(
     c:  float,
     method: str = "mlp",
     alpha_hidden_dim: int = 32,
-    alpha_epochs: int = 800,
+    alpha_epochs: int = 500,
     alpha_lr: float = 0.01,
-    lambda_lr: float = 50,
+    lambda_lr: float = 80,
 ) -> Tuple[nn.Module, float, Tensor]:
     """
     Single‐split MAR debiasing with budget constraint enforced via
@@ -502,7 +504,7 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mar_cov00(
         alpha_model=alpha_model,
         moment_fn=moment_fn,
         tau=tau,
-        lambda_pen=(lambda_lr*c - 30 * tau),
+        lambda_pen=(lambda_lr*c - 50 * tau),
         lr_alpha=alpha_lr,
         alpha_epochs=alpha_epochs
     )
@@ -620,7 +622,7 @@ def lm_fix_alpha(
     for rep in tqdm(range(reps),total=reps):
         set_global_seed(seed + rep)
         # 1) Generate complete data once
-        X2, U1_2, U2_2, Y2, W1_2, W2_2, V2 = lm_generate_complete_data(
+        X2, Y2, W1_2, W2_2, V2 = lm_generate_complete_data(
             n=n2, d_x=d_x, d_u1=d_u1, d_u2=d_u2,
             theta_star=theta_star,
             beta1_star=beta1_star,
@@ -689,7 +691,8 @@ def lm_fix_alpha(
         residuals = Y_ols - (X_ols @ theta_ols_vec.view(-1, 1))
         s_squared = (residuals.T @ residuals).item() / (n_ols - d_ols)
         inv_xtx = torch.inverse(X_ols.T @ X_ols)
-        
+        # value = s_squared * inv_xtx[0, 0].item() * (n_ols - d_ols)
+        # print(f"[DEBUG]  s_squared * inv_xtx[0,0] * (n_ols-d_ols) = {value:.6f}")
         se_ols_1 = torch.sqrt(s_squared * inv_xtx[0, 0]).item()
         ci_ols_low, ci_ols_high = wald_ci(
             mu_hat=theta_ols_vec[0].item(),
@@ -794,7 +797,7 @@ def lm_change_alpha_every_iter(
         )
 
         # ---------- Stage-2 : generate complete data ----------
-        X2, U1_2, U2_2, Y2, W1_2, W2_2, V2 = lm_generate_complete_data(
+        X2, Y2, W1_2, W2_2, V2 = lm_generate_complete_data(
             n=n2, d_x=d_x, d_u1=d_u1, d_u2=d_u2,
             theta_star=theta_star,
             beta1_star=beta1_star,
@@ -967,7 +970,7 @@ def lm_mcar_extended(
     for rep in tqdm(range(reps), total=reps):
         set_global_seed(seed + rep)
         # 1) Generate complete data once
-        X2, U1_2, U2_2, Y2, W1_2, W2_2, V2 = lm_generate_complete_data(
+        X2, Y2, W1_2, W2_2, V2 = lm_generate_complete_data(
             n=n2, d_x=d_x, d_u1=d_u1, d_u2=d_u2,
             theta_star=theta_star,
             beta1_star=beta1_star,

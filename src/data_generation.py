@@ -88,24 +88,24 @@ def lm_generate_complete_data(
     theta_star_shape = theta_star.shape
 
     # Randomly generate theta1 and theta2 with the same shape as theta_star
-    theta1 = torch.randn(theta_star_shape, device=device)  * 0.1  # Using torch.randn for random normal distribution
+    theta1 = torch.randn(theta_star_shape, device=device)  * 0.2  # Using torch.randn for random normal distribution
     theta2 = torch.randn(theta_star_shape, device=device) * 0.1
 
     # 1) Latent covariates
     X = _sample_mv(n, d_x, Sigma_X, device=device)
-    U1 = _sample_mv(n, d_u1, Sigma_U1, device=device)
-    U2 = _sample_mv(n, d_u2, Sigma_U2, device=device)
+    # U1 = _sample_mv(n, d_u1, Sigma_U1, device=device)
+    # U2 = _sample_mv(n, d_u2, Sigma_U2, device=device)
 
     # 2) Independent Gaussian noise terms
-    eps = torch.randn(n, device=device) * sigma_eps * 5
+    eps = torch.randn(n, device=device) * sigma_eps * 8
     eps2 = torch.randn(n, device=device) * sigma_eps * 2
     eps3 = torch.randn(n, device=device) * sigma_eps * 3
 
     # 3) Core linear parts
     X_theta = X @ theta_star
-    U1_beta = U1 @ beta1_star
-    U1_beetae = X @ (beta1_star + theta1)
-    U2_beta = U2 @ beta2_star
+    # U1_beta = U1 @ beta1_star
+    # U1_beetae = X @ (beta1_star + theta1)
+    # U2_beta = U2 @ beta2_star
     X_theta1 = X @ (theta_star + theta1)
     X_theta2 = X @ (theta_star + theta2)
 
@@ -123,8 +123,6 @@ def lm_generate_complete_data(
     # 5) Shape to column vectors
     return (
         X,
-        U1,
-        U2,
         Y.unsqueeze(1),
         W1.unsqueeze(1),
         W2.unsqueeze(1),
@@ -206,7 +204,7 @@ def lm_generate_obs_data_mcar(
     device = utils.get_device() if device is None else device
 
     # 1) Complete data
-    X, U1, U2, Y, W1, W2, V = lm_generate_complete_data(
+    X, Y, W1, W2, V = lm_generate_complete_data(
         n, d_x, d_u1, d_u2,
         theta_star, beta1_star, beta2_star,
         Sigma_X=Sigma_X,
@@ -328,7 +326,7 @@ def lm_generate_obs_data_mar(
     device = utils.get_device() if device is None else device
 
     # 2) Generate complete data
-    X, U1, U2, Y, W1, W2, V = lm_generate_complete_data(
+    X, Y, W1, W2, V = lm_generate_complete_data(
         n, d_x, d_u1, d_u2,
         theta_star, beta1_star, beta2_star,
         Sigma_X=Sigma_X,

@@ -160,7 +160,7 @@ def lm_build_all_psi(
     feats_psi3 = torch.cat([X, W1, W2], dim=1)
 
     with torch.enable_grad():
-# ψ₂
+        # ψ₂
         psi_model_2 = train_model(
             feats_psi2, Y,
             method=method,        # "mlp", "mlpclass", ...
@@ -271,7 +271,7 @@ def lm_build_all_psi_weighted(
         psi_model_2 = train_model(
             feats_psi2, Y,
             method=method,        # "mlp", "mlpclass", ...
-            epochs=200,           # total training epochs
+            epochs=300,           # total training epochs
             lr=2e-3,              # initial learning rate
             scheduler_name="cosine",   # (default) cosine decay → 0
             # scheduler_kw={}     # extra kwargs if needed
@@ -281,7 +281,7 @@ def lm_build_all_psi_weighted(
         psi_model_3 = train_model(
             feats_psi3, Y,
             method=method,
-            epochs=200,
+            epochs=300,
             lr=2e-3,
             scheduler_name="cosine"
         ).eval()
@@ -624,7 +624,12 @@ def general_estimate_moments_mcar(
         (phi2_2.T @ phi2_2) / X2.shape[0],
         (phi3_3.T @ phi3_3) / X3.shape[0]
     ]
+    # E_psi1_psi1T = (psi1_1.T @ psi1_1) / X1.shape[0]
 
+    # # *** DEBUG 打印 ***
+    # for idx, E_phi in enumerate(E_phi_phiT_list, 1):
+    #     print(f"\nE[phi{idx} phi{idx}^T] =\n", E_phi)
+    # print("\nE[psi1 psi1^T] =\n", E_psi1_psi1T)
     # 4. Pack results
     return {
         "E[psi1 psi1^T]":   (psi1_1.T @ psi1_1) / X1.shape[0],
@@ -959,6 +964,17 @@ def general_estimate_variance_mcar(
     # ---------------- 4) covariance estimator ---------------
     correction = cov_psi_phi1 @ inv_weighted_phi_cov @ cov_psi_phi1.T  # (d, d)
     cov_theta  = E_psi1_psi1T / alpha1 - correction                    # (d, d)
+    # # *** DEBUG 打印 ***
+    # print("\ninv_weighted_phi_cov =\n", inv_weighted_phi_cov)
+    # print("\ncov_psi_phi1 =\n", cov_psi_phi1)
+    # print("\ncorrection =\n", correction)
+    # print("\nE_psi1_psi1T / alpha1 =\n", E_psi1_psi1T / alpha1)
+    # print("\ncov_theta =\n", cov_theta)
+    torch.set_printoptions(precision=4, linewidth=120, sci_mode=False)
+
+    def r(t, dec=4):
+        factor = 10 ** dec
+        return (t * factor).round() / factor
     return cov_theta
 
 
@@ -1553,7 +1569,7 @@ def train_alpha_aug_lagrange(
     alpha_epochs: int = 500,
     scheduler_name: str = "linear",      #  <-- NEW: choose lr scheduler
     scheduler_kw: Optional[dict] = None, #      additional kwargs for it
-    log_interval: int = 10,
+    log_interval: int = 50,
     clip_grad_norm: float = 1.0,
 ) -> nn.Module:
     """
@@ -1652,7 +1668,7 @@ def train_alpha_aug_lagrange(
         elif epoch % 100 == 0:
             rho *= 1.5            # toughen penalty if still infeasible
 
-        # ---- logging ----
+        # #---- logging ----
         # if epoch == 1 or epoch % log_interval == 0:
         #     current_lr = opt.param_groups[0]["lr"]
         #     print(
@@ -1671,7 +1687,7 @@ def train_alpha_with_penalty(
     lambda_pen: float = 200,
     lr_alpha: float = 1e-4,
     alpha_epochs: int = 500,
-    log_interval: int = 10,
+    log_interval: int = 50,
 ) -> nn.Module:
     """
     Penalty method for training alpha_model with a linear penalty:
@@ -1695,13 +1711,13 @@ def train_alpha_with_penalty(
         loss.backward()
         opt.step()
 
-        # 5) logging every `log_interval` epochs
-        if epoch == 1 or epoch % log_interval == 0:
-            print(
-                f"Epoch {epoch:3d} | loss={loss.item():.4f} | "
-                f"Cov00={cov00.item():.4f} | cost={cost.item():.4f} | "
-                f"violation={violation.item():.4f}"
-            )
+        # # 5) logging every `log_interval` epochs
+        # if epoch == 1 or epoch % log_interval == 0:
+        #     print(
+        #         f"Epoch {epoch:3d} | loss={loss.item():.4f} | "
+        #         f"Cov00={cov00.item():.4f} | cost={cost.item():.4f} | "
+        #         f"violation={violation.item():.4f}"
+        #     )
 
     return alpha_model
 
