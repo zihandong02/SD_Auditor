@@ -513,8 +513,8 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mar_cov00(
         tau             = tau,
         lambda_init     = 0.0,
         rho_init        = 10.0,
-        lr_alpha        = 5e-3,          # initial LR
-        alpha_epochs    = 600,           # total epochs
+        lr_alpha        = 1e-3,          # initial LR
+        alpha_epochs    = 500,           # total epochs
         scheduler_name  = "linear",      # <-- keeps LR adjustment
         # scheduler_kw  = {},            # optional extra args
     )
@@ -545,7 +545,7 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mar_cov00(
 # 1) Algorithm 1 wrapper  (choose alpha* & evaluate)
 # ======================================================================
 
-def lm_mcar(
+def lm_fix_alpha(
     *,
     # --------------- batch sizes -----------------
     n1: int,
@@ -729,6 +729,158 @@ def lm_mcar(
         covg_mar  = float(sum(cov_mar)  / reps),
         covg_base = float(sum(cov_base) / reps),
         covg_ols = float(sum(cov_ols) / reps),
+    )
+
+
+
+def lm_change_alpha_every_iter(
+    *,
+    # -------- batch sizes --------
+    n1: int, n2: int, reps: int,
+    # -------- model dims ---------
+    d_x: int, d_u1: int, d_u2: int,
+    # -------- true parameters ----
+    theta_star: torch.Tensor,
+    beta1_star: torch.Tensor,
+    beta2_star: torch.Tensor,
+    # -------- noise --------------
+    sigma_eps: float,
+    # -------- MCAR / CI ----------
+    alpha_level: float, tau: float, c: float,
+    alpha_init: torch.Tensor,
+    # -------- misc ---------------
+    seed: int = 42,
+) -> Dict[str, float | torch.Tensor]:
+
+    device, dtype = theta_star.device, theta_star.dtype
+
+    # -------- baseline α (α₂ = 0) — 常数，循环外即可 --------
+    alpha1_base  = max(1e-6, min(1 - 1e-6, tau / c))
+    alpha_baseline = torch.tensor(
+        [alpha1_base, 0.0, 1.0 + (c - 1.0) * alpha1_base - tau],
+        device=device, dtype=dtype
+    )
+
+    # -------- 容器 --------
+    err_opt, err_mar, err_base, err_ols = [], [], [], []
+    len_opt, len_mar, len_base, len_ols = [], [], [], []
+    cov_opt, cov_mar, cov_base, cov_ols = [], [], [], []
+
+    # ======== Stage-2 循环，每次都重新执行 Stage-1 搜策略 ========
+    for rep in tqdm(range(reps), total=reps):
+        set_global_seed(seed + rep)
+
+        # ---------- Stage-1 : obtain α*_opt & α_model_opt ----------
+        X1, Y1, W1_1, W2_1, V1, R1 = lm_generate_obs_data_mcar(
+            n=n1,
+            d_x=d_x, d_u1=d_u1, d_u2=d_u2,
+            theta_star=theta_star,
+            beta1_star=beta1_star,
+            beta2_star=beta2_star,
+            alpha=alpha_init,
+            sigma_eps=sigma_eps,
+        )
+
+        alpha_opt, cov00_opt, _ = lm_mono_debias_budget_constrained_obtain_alpha_mcar_cov00(
+            X1, Y1, W1_1, W2_1, V1, R1,
+            tau=tau, c=c, method="mlp"
+        )
+
+        alpha_model_opt, cov00_model_opt, _ = (
+            lm_mono_debias_budget_constrained_obtain_alpha_mar_cov00(
+                X1, Y1, W1_1, W2_1, V1, R1,
+                tau=tau, c=c, method="mlp"
+            )
+        )
+
+        # ---------- Stage-2 : generate complete data ----------
+        X2, U1_2, U2_2, Y2, W1_2, W2_2, V2 = lm_generate_complete_data(
+            n=n2, d_x=d_x, d_u1=d_u1, d_u2=d_u2,
+            theta_star=theta_star,
+            beta1_star=beta1_star,
+            beta2_star=beta2_star,
+            sigma_eps=sigma_eps,
+        )
+
+        # ===== (A) MCAR-α_opt =====
+        XA, YA, W1A, W2A, VA, RA = general_generate_mcar(
+            X2, Y2, W1_2, W2_2, V2, alpha=alpha_opt
+        )
+        theta_opt_vec, cov_opt_mat = lm_mono_debias_estimate_mcar_crossfit(
+            XA, YA, W1A, W2A, VA, RA,
+            alpha=alpha_opt, method="mlp"
+        )
+        se_opt = torch.sqrt(cov_opt_mat[0, 0] / n2).item()
+        ci_opt_low, ci_opt_high = wald_ci(theta_opt_vec[0].item(), se_opt, alpha_level)
+
+        # ===== (B) MAR-α_model_opt =====
+        XM, YM, W1M, W2M, VM, RM = general_generate_mar(
+            X2, Y2, W1_2, W2_2, V2, alpha_fn=alpha_model_opt
+        )
+        theta_mar_vec, cov_mar_mat = lm_mono_debias_estimate_mar_crossfit(
+            XM, YM, W1M, W2M, VM, RM,
+            alpha_fn=alpha_model_opt, method="mlp"
+        )
+        se_mar = torch.sqrt(cov_mar_mat[0, 0] / n2).item()
+        ci_mar_low, ci_mar_high = wald_ci(theta_mar_vec[0].item(), se_mar, alpha_level)
+
+        # ===== (C) MCAR-baseline α₂=0 =====
+        XB, YB, W1B, W2B, VB, RB = general_generate_mcar(
+            X2, Y2, W1_2, W2_2, V2, alpha=alpha_baseline
+        )
+        theta_base_vec, cov_base_mat = lm_mono_debias_estimate_mcar_crossfit(
+            XB, YB, W1B, W2B, VB, RB,
+            alpha=alpha_baseline, method="mlp"
+        )
+        se_base = torch.sqrt(cov_base_mat[0, 0] / n2).item()
+        ci_base_low, ci_base_high = wald_ci(theta_base_vec[0].item(), se_base, alpha_level)
+
+        # ===== (D) OLS on fully observed rows =====
+        mask = ~torch.isnan(YB).view(-1)
+        X_ols, Y_ols = X2[mask], Y2[mask]
+        n_ols, d_ols = X_ols.shape
+        theta_ols_vec = lm_fit_ols(X_ols, Y_ols)
+
+        resid = Y_ols - (X_ols @ theta_ols_vec.view(-1, 1))
+        s2 = (resid.T @ resid).item() / (n_ols - d_ols)
+        inv_xtx = torch.inverse(X_ols.T @ X_ols)
+        se_ols = torch.sqrt(s2 * inv_xtx[0, 0]).item()
+        ci_ols_low, ci_ols_high = wald_ci(theta_ols_vec[0].item(), se_ols, alpha_level)
+
+        # ===== accumulate metrics =====
+        err_opt .append(abs(theta_opt_vec[0] - theta_star[0]).item())
+        err_mar .append(abs(theta_mar_vec[0] - theta_star[0]).item())
+        err_base.append(abs(theta_base_vec[0] - theta_star[0]).item())
+        err_ols .append(abs(theta_ols_vec[0] - theta_star[0]).item())
+
+        len_opt .append(ci_opt_high  - ci_opt_low)
+        len_mar .append(ci_mar_high  - ci_mar_low)
+        len_base.append(ci_base_high - ci_base_low)
+        len_ols.append(ci_ols_high   - ci_ols_low)
+
+        cov_opt .append(int(ci_opt_low  <= theta_star[0].item() <= ci_opt_high))
+        cov_mar .append(int(ci_mar_low  <= theta_star[0].item() <= ci_mar_high))
+        cov_base.append(int(ci_base_low <= theta_star[0].item() <= ci_base_high))
+        cov_ols.append(int(ci_ols_low   <= theta_star[0].item() <= ci_ols_high))
+
+    # ---------------- aggregate & return ----------------
+    def _m(x): return float(sum(x) / reps)
+
+    return dict(
+        alpha_opt = ((alpha_opt.cpu() * 1e4).round() / 1e4).tolist(),  # last rep
+        cov00_opt = float(cov00_opt),                                  # last rep
+        mean_l2_opt   = _m(err_opt),
+        mean_l2_mar   = _m(err_mar),
+        mean_l2_base  = _m(err_base),
+        mean_l2_ols   = _m(err_ols),
+        mean_len_opt  = _m(len_opt),
+        mean_len_mar  = _m(len_mar),
+        mean_len_base = _m(len_base),
+        mean_len_ols  = _m(len_ols),
+        covg_opt   = _m(cov_opt),
+        covg_mar   = _m(cov_mar),
+        covg_base  = _m(cov_base),
+        covg_ols   = _m(cov_ols),
     )
 
 

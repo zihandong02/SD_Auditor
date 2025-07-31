@@ -88,8 +88,8 @@ def lm_generate_complete_data(
     theta_star_shape = theta_star.shape
 
     # Randomly generate theta1 and theta2 with the same shape as theta_star
-    theta1 = torch.randn(theta_star_shape, device=device)  * 0.2  # Using torch.randn for random normal distribution
-    theta2 = torch.randn(theta_star_shape, device=device) * 2
+    theta1 = torch.randn(theta_star_shape, device=device)  * 0.1  # Using torch.randn for random normal distribution
+    theta2 = torch.randn(theta_star_shape, device=device) * 0.1
 
     # 1) Latent covariates
     X = _sample_mv(n, d_x, Sigma_X, device=device)
@@ -98,23 +98,23 @@ def lm_generate_complete_data(
 
     # 2) Independent Gaussian noise terms
     eps = torch.randn(n, device=device) * sigma_eps * 5
-    eps2 = torch.randn(n, device=device) * sigma_eps * 5
-    eps3 = torch.randn(n, device=device) * sigma_eps * 5
+    eps2 = torch.randn(n, device=device) * sigma_eps * 2
+    eps3 = torch.randn(n, device=device) * sigma_eps * 3
 
     # 3) Core linear parts
     X_theta = X @ theta_star
     U1_beta = U1 @ beta1_star
     U1_beetae = X @ (beta1_star + theta1)
     U2_beta = U2 @ beta2_star
-    X_theta1 = X @ (beta1_star + theta1)
-    X_theta2 = X @ beta1_star
+    X_theta1 = X @ (theta_star + theta1)
+    X_theta2 = X @ (theta_star + theta2)
 
     # Y  = X_theta + U1_beta + eps
     # W1 = X_theta2 + U1_beta + eps2
     # W2 = X_theta2 + U1_beetae + eps3
 
     Y =  X_theta + eps
-    W1 = X_theta2 + eps + eps2
+    W1 = X_theta1 + eps2
     W2 = X_theta2 + eps3
 
     # 4) Preference indicator

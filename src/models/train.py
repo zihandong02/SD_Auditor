@@ -39,8 +39,8 @@ def train_model(
     X, y,
     *,
     method: Literal["mlp", "mlpclass", "linreg", "logistic"] = "mlp",
-    epochs: int = 200,
-    batch_size: int = 50_000,
+    epochs: int = 250,
+    batch_size: int = 50000,
     lr: float = 1e-3,
     device: Optional[torch.device] = None,
     # ---- NEW options ----
