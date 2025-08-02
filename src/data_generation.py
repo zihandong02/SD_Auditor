@@ -114,8 +114,8 @@ def lm_generate_complete_data(
     # W2 = X_theta2 + U1_beetae + eps3
 
     Y =  X_theta + eps
-    W1 = X_theta1 + eps2
-    W2 = X_theta2 + eps3
+    W1 = X_theta1 + eps2 + eps * 0.075
+    W2 = X_theta2 + eps3 + eps * 0.075
 
     # 4) Preference indicator
     V = (torch.abs(W1 - Y) <= torch.abs(W2 - Y)).long()

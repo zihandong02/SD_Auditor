@@ -445,7 +445,7 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mar_cov00(
     alpha_hidden_dim: int = 32,
     alpha_epochs: int = 500,
     alpha_lr: float = 0.01,
-    lambda_lr: float = 80,
+    lambda_lr: float = 170,
 ) -> Tuple[nn.Module, float, Tensor]:
     """
     Single‐split MAR debiasing with budget constraint enforced via
@@ -500,26 +500,26 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mar_cov00(
     )
 
     #6) Primal–dual training of alpha_model
-    alpha_model = train_alpha_with_penalty(
-        alpha_model=alpha_model,
-        moment_fn=moment_fn,
-        tau=tau,
-        lambda_pen=(lambda_lr*c - 50 * tau),
-        lr_alpha=alpha_lr,
-        alpha_epochs=alpha_epochs
-    )
-
-    # alpha_model = train_alpha_aug_lagrange(
-    #     alpha_model     = alpha_model,
-    #     moment_fn       = moment_fn,
-    #     tau             = tau,
-    #     lambda_init     = 0.0,
-    #     rho_init        = 10.0,
-    #     lr_alpha        = 1e-3,          # initial LR
-    #     alpha_epochs    = 500,           # total epochs
-    #     scheduler_name  = "linear",      # <-- keeps LR adjustment
-    #     # scheduler_kw  = {},            # optional extra args
+    # alpha_model = train_alpha_with_penalty(
+    #     alpha_model=alpha_model,
+    #     moment_fn=moment_fn,
+    #     tau=tau,
+    #     lambda_pen=(lambda_lr*c - 160 * tau),
+    #     lr_alpha=alpha_lr,
+    #     alpha_epochs=alpha_epochs
     # )
+
+    alpha_model = train_alpha_aug_lagrange(
+        alpha_model     = alpha_model,
+        moment_fn       = moment_fn,
+        tau             = tau,
+        lambda_init     = 0.0,
+        rho_init        = 10.0,
+        lr_alpha        = 1e-3,          # initial LR
+        alpha_epochs    = 500,           # total epochs
+        scheduler_name  = "cosine",      # <-- keeps LR adjustment
+        # scheduler_kw  = {},            # optional extra args
+    )
 
     # 7) Final evaluation of variance and full covariance
     cov00_fn = general_get_cov00_function_alpha_mar(moment_fn)

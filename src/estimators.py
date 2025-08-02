@@ -1184,7 +1184,6 @@ def general_get_cov00_function_alpha_mar(
 
         # 2) Build the weighted phi covariance: sum_j E[alpha_j * phi_j phi_j^T]
         weighted_phi_cov = sum(E_alpha_phi_phiT_list)  # shape (d, d)
-
         # 3) Invert the weighted phi covariance
         inv_weighted = torch.linalg.inv(weighted_phi_cov)
 
