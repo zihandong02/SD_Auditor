@@ -68,51 +68,107 @@ class LogisticReg(nn.Module):
         return self.w(x)
     
 
+# class AlphaModel_1(nn.Module):
+#     """
+#     Multiclass logistic regression with optional one hidden layer.
+#     If hidden_dim is None, it's just a single linear→softmax.
+#     Otherwise: input → Linear(hidden_dim) → ReLU → Linear(3) → softmax.
+#     """
+#     def __init__(self,
+#                  dim_x: int,
+#                  dim_w1: int,
+#                  dim_w2: int,
+#                  hidden_dim: Optional[int] = None):
+#         super().__init__()
+#         input_dim = dim_x + dim_w1 + dim_w2
+
+#         self.use_hidden = hidden_dim is not None
+#         if self.use_hidden:
+#             # hidden layer + output layer
+#             self.hidden = nn.Linear(input_dim, hidden_dim, bias=True)
+#             self.activation = nn.ReLU()
+#             self.output  = nn.Linear(hidden_dim, 3,      bias=True)
+#         else:
+#             # single linear layer to 3 logits
+#             self.linear = nn.Linear(input_dim, 3, bias=True)
+
+#     def forward(self,
+#                 X: torch.Tensor,   # (batch_size, dim_x)
+#                 W1: torch.Tensor,  # (batch_size, dim_w1)
+#                 W2: torch.Tensor   # (batch_size, dim_w2)
+#                ) -> torch.Tensor:  # returns (batch_size, 3)
+#         # 1) concatenate inputs
+#         H = torch.cat([X, W1, W2], dim=1)  # (batch, input_dim)
+
+#         if self.use_hidden:
+#             # 2a) hidden projection + nonlinearity
+#             H = self.activation(self.hidden(H))  # (batch, hidden_dim)
+#             # 3a) project to 3 logits
+#             logits = self.output(H)              # (batch, 3)
+#         else:
+#             # 2b) directly project to 3 logits
+#             logits = self.linear(H)              # (batch, 3)
+
+#         # 4) softmax → probabilities summing to 1
+#         alpha = torch.softmax(logits, dim=1)     # (batch, 3)
+#         return alpha
+
+
 class AlphaModel(nn.Module):
     """
-    Multiclass logistic regression with optional one hidden layer.
-    If hidden_dim is None, it's just a single linear→softmax.
-    Otherwise: input → Linear(hidden_dim) → ReLU → Linear(3) → softmax.
+    Multiclass logistic regression with optional 1- or 2-layer MLP.
+
+    If hidden_dim is None:
+        input -> Linear(3) -> softmax
+    Else if hidden_dim2 is None:
+        input -> Linear(hidden_dim) -> ReLU -> Linear(3) -> softmax
+    Else:
+        input -> Linear(hidden_dim) -> ReLU -> Linear(hidden_dim2) -> ReLU -> Linear(3) -> softmax
     """
     def __init__(self,
                  dim_x: int,
                  dim_w1: int,
                  dim_w2: int,
-                 hidden_dim: Optional[int] = None):
+                 hidden_dim: Optional[int] = None,
+                 hidden_dim2: Optional[int] = None):
         super().__init__()
         input_dim = dim_x + dim_w1 + dim_w2
 
         self.use_hidden = hidden_dim is not None
         if self.use_hidden:
-            # hidden layer + output layer
-            self.hidden = nn.Linear(input_dim, hidden_dim, bias=True)
-            self.activation = nn.ReLU()
-            self.output  = nn.Linear(hidden_dim, 3,      bias=True)
+            # first hidden layer
+            self.hidden1 = nn.Linear(input_dim, hidden_dim, bias=True)
+            self.act1    = nn.ReLU()
+
+            # second hidden layer (optional)
+            out_dim2 = hidden_dim if hidden_dim2 is None else hidden_dim2
+            self.has_second = hidden_dim2 is not None
+            if self.has_second:
+                self.hidden2 = nn.Linear(hidden_dim, out_dim2, bias=True)
+                self.act2    = nn.ReLU()
+                self.output  = nn.Linear(out_dim2, 3, bias=True)
+            else:
+                self.output  = nn.Linear(hidden_dim, 3, bias=True)
         else:
             # single linear layer to 3 logits
             self.linear = nn.Linear(input_dim, 3, bias=True)
 
     def forward(self,
-                X: torch.Tensor,   # (batch_size, dim_x)
-                W1: torch.Tensor,  # (batch_size, dim_w1)
-                W2: torch.Tensor   # (batch_size, dim_w2)
-               ) -> torch.Tensor:  # returns (batch_size, 3)
-        # 1) concatenate inputs
-        H = torch.cat([X, W1, W2], dim=1)  # (batch, input_dim)
+                X: torch.Tensor,   # (batch, dim_x)
+                W1: torch.Tensor,  # (batch, dim_w1)
+                W2: torch.Tensor   # (batch, dim_w2)
+               ) -> torch.Tensor:  # (batch, 3)
+        H = torch.cat([X, W1, W2], dim=1)
 
         if self.use_hidden:
-            # 2a) hidden projection + nonlinearity
-            H = self.activation(self.hidden(H))  # (batch, hidden_dim)
-            # 3a) project to 3 logits
-            logits = self.output(H)              # (batch, 3)
+            H = self.act1(self.hidden1(H))
+            if getattr(self, "has_second", False):
+                H = self.act2(self.hidden2(H))
+            logits = self.output(H)
         else:
-            # 2b) directly project to 3 logits
-            logits = self.linear(H)              # (batch, 3)
+            logits = self.linear(H)
 
-        # 4) softmax → probabilities summing to 1
-        alpha = torch.softmax(logits, dim=1)     # (batch, 3)
-        return alpha
-
+        return torch.softmax(logits, dim=1)
 # ----------------------------------------------------------------------
 # 2) Registry & helpers
 # ----------------------------------------------------------------------

@@ -17,7 +17,8 @@ def plot_ci_and_cov_vs_tau(
     df: pd.DataFrame,
     alpha_level: float,
     out_dir: Path,
-    prefix: str = "ci_cov"
+    prefix: str = "ci_cov",
+    c_value: float | None = None,
 ):
     """
     Plot CI length and coverage vs tau in a single figure.
@@ -27,6 +28,7 @@ def plot_ci_and_cov_vs_tau(
     alpha_level:  significance level for coverage reference line
     out_dir:      directory in which to save the figure
     prefix:       filename prefix
+    c_value:      number shown at the top title, e.g., 'c = 0.5'
     """
     # pick vibrant colors and distinct markers
     colors  = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a"]
@@ -44,8 +46,7 @@ def plot_ci_and_cov_vs_tau(
     # Plot CI length vs τ
     # -----------------------
     for col, c, m, lab in zip(length_cols, colors, markers, labels):
-        ax_len.plot(df.index, df[col],
-                    marker=m, linestyle="-", color=c, label=lab)
+        ax_len.plot(df.index, df[col], marker=m, linestyle="-", color=c, label=lab)
     ax_len.set_xlabel(r"$\tau$")
     ax_len.set_ylabel("CI length")
     ax_len.grid(True, linestyle="--", alpha=0.5)
@@ -55,11 +56,9 @@ def plot_ci_and_cov_vs_tau(
     # Plot coverage vs τ
     # --------------------------
     for col, c, m, lab in zip(coverage_cols, colors, markers, labels):
-        ax_cov.plot(df.index, df[col],
-                    marker=m, linestyle="-", color=c, label=lab)
+        ax_cov.plot(df.index, df[col], marker=m, linestyle="-", color=c, label=lab)
     ax_cov.axhline(
-        1 - alpha_level,
-        linestyle="--", color="gray",
+        1 - alpha_level, linestyle="--", color="gray",
         label=f"$1-\\alpha = {1-alpha_level:.2f}$"
     )
     ax_cov.set_xlabel(r"$\tau$")
@@ -68,32 +67,24 @@ def plot_ci_and_cov_vs_tau(
     ax_cov.grid(True, linestyle="--", alpha=0.5)
     ax_cov.legend(title="Method", loc="lower right")
 
-    # adjust layout and save
-    fig.tight_layout()
+    # title at the very top
+    if c_value is not None:
+        fig.suptitle(fr"$c = {c_value:g}$", y=1.02, fontsize=12)
+
+    # adjust layout and save (leave room for suptitle)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     savepath = out_dir / f"{prefix}_vs_tau.pdf"
-    fig.savefig(savepath)
+    fig.savefig(savepath, bbox_inches="tight")
     plt.close(fig)
     print(f"[INFO] saved combined plot to {savepath}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Plot CI length & coverage vs τ")
-    parser.add_argument(
-        "--csv",
-        required=True,
-        help="Path to the CSV file produced by main.py"
-    )
-    parser.add_argument(
-        "--out_dir",
-        required=True,
-        help="Directory in which to save the figure"
-    )
-    parser.add_argument(
-        "--alpha_level",
-        type=float,
-        default=0.10,
-        help="Significance level (default: 0.10)"
-    )
+    parser.add_argument("--csv", required=True, help="Path to the CSV file produced by main.py")
+    parser.add_argument("--out_dir", required=True, help="Directory in which to save the figure")
+    parser.add_argument("--alpha_level", type=float, default=0.10, help="Significance level (default: 0.10)")
+    parser.add_argument("--c", type=float, required=True, help="Value of c to display at the top of the figure")
     args = parser.parse_args()
 
     csv_path = Path(args.csv)
@@ -114,7 +105,8 @@ def main():
     plot_ci_and_cov_vs_tau(
         df,
         alpha_level=args.alpha_level,
-        out_dir=out_dir
+        out_dir=out_dir,
+        c_value=args.c,
     )
 
 

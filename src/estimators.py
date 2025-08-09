@@ -637,6 +637,65 @@ def general_estimate_moments_mcar(
         "Cov(psi1, phi1)": (psi1_1.T @ phi1_1) / X1.shape[0],
     }
 
+
+def general_estimate_moments_mcar_only_complete_data(
+    psi_1: Callable[[Tensor, Tensor], Tensor],
+    phi_1: Callable[[Tensor, Tensor, Tensor, Tensor], Tensor],
+    phi_2: Callable[[Tensor, Tensor, Tensor, Tensor], Tensor],
+    phi_3: Callable[[Tensor, Tensor, Tensor, Tensor], Tensor],
+    X: Tensor,
+    Y: Tensor,
+    W1: Tensor,
+    W2: Tensor,
+    V: Tensor,
+    debug: bool = False,  # Optional: print matrices when True
+) -> Dict[str, List[Tensor] | Tensor]:
+    """
+    Estimate second-order moments and selected cross-moments under MCAR.
+
+    Returns
+    -------
+    dict
+        {
+          "E[psi1 psi1^T]": (d, d) Tensor,
+          "E[phi_j phi_j^T]": list[(d, d)],  # [φ₁, φ₂, φ₃]
+          "Cov(psi1, phi1)": (d, d) Tensor,
+        }
+    """
+    n, d = X.shape
+
+    # 1. Evaluate basis functions on the full batch
+    psi1_vals = psi_1(X, Y)                     # (n, d)
+    phi1_vals = phi_1(X, W1, W2, V)             # (n, d)
+    phi2_vals = phi_2(X, W1, W2, V)             # (n, d)
+    phi3_vals = phi_3(X, W1, W2, V)             # (n, d)
+
+    # 2. E[ψ₁ ψ₁ᵀ]
+    E_psi1_psi1T = (psi1_vals.T @ psi1_vals) / n
+
+    # 3. E[φⱼ φⱼᵀ] and Cov(ψ₁, φ₁)
+    E_phi_phiT_list = [
+        (phi1_vals.T @ phi1_vals) / n,          # φ₁
+        (phi2_vals.T @ phi2_vals) / n,          # φ₂
+        (phi3_vals.T @ phi3_vals) / n,          # φ₃
+    ]
+    Cov_psi1_phi1 = (psi1_vals.T @ phi1_vals) / n
+
+    # 4. Optional debug output
+    if debug:
+        torch.set_printoptions(precision=4, sci_mode=False)
+        print("\nE[psi1 psi1^T] =\n", E_psi1_psi1T)
+        for idx, E_phi in enumerate(E_phi_phiT_list, 1):
+            print(f"\nE[phi{idx} phi{idx}^T] =\n", E_phi)
+        print("\nCov(psi1, phi1) =\n", Cov_psi1_phi1)
+
+    # 5. Pack results
+    return {
+        "E[psi1 psi1^T]":   E_psi1_psi1T,
+        "E[phi_j phi_j^T]": E_phi_phiT_list,
+        "Cov(psi1, phi1)":  Cov_psi1_phi1,
+    }
+
 def general_estimate_moments_mar( 
     psi_1: Callable[[Tensor, Tensor], Tensor],
     phi_1: Callable[[Tensor, Tensor, Tensor, Tensor], Tensor],
@@ -1566,91 +1625,111 @@ def train_alpha_aug_lagrange(
     *,
     lr_alpha: float = 2e-3,
     alpha_epochs: int = 500,
-    scheduler_name: str = "linear",      #  <-- NEW: choose lr scheduler
-    scheduler_kw: Optional[dict] = None, #      additional kwargs for it
+    scheduler_name: str = "linear",       # choose LR scheduler
+    scheduler_kw: Optional[dict] = None,  # optional kwargs for the scheduler
     log_interval: int = 50,
     clip_grad_norm: float = 1.0,
 ) -> nn.Module:
     """
-    Augmented-Lagrangian training for ``alpha_model``.
+    Augmented-Lagrangian training for ``alpha_model`` with an inequality constraint.
 
-    L(α, λ) = Cov00(α) + λ · (g(α) − τ) + (ρ / 2) · (g(α) − τ)²  
-    where g(α) = E[c·α₁ + α₂].
+    Objective
+    ---------
+    Minimize:  L(α, λ) = Cov00(α) + λ · [g(α) − τ]_+ + (ρ / 2) · [g(α) − τ]_+^2
+    where     g(α) = E[c·α₁ + α₂]  and  [x]_+ = max(x, 0).
 
-    Updates per epoch
+    Per-epoch updates
     -----------------
-    • α  ←  α − lr_alpha · ∇_α L            (minimization step)  
-    • λ  ←  max(0, λ + ρ · (g(α) − τ))      (projected ascent)  
-    • ρ  is adapted:   decrease when close to feasibility, increase otherwise.
+    • α  ←  α − lr_alpha · ∇_α L                  (descent on α)
+    • λ  ←  max(0, λ + η_λ · ρ · [g(α) − τ]_+)    (projected ascent, only if violated)
+    • ρ  is adapted: relax in feasible region, tighten if persistently infeasible.
 
     Parameters
     ----------
     alpha_model : nn.Module
         Model that outputs α-parameters.
     moment_fn : callable
-        Function returning moment statistics given the model.
+        Function returning required moments given the current model.
+        Must include key "E[c alpha1 + alpha2]".
     tau : float
         Feasibility threshold for g(α).
     lambda_init : float, default 0.0
-        Initial value for the Lagrange multiplier λ.
+        Initial value for the Lagrange multiplier λ (nonnegative).
     rho_init : float, default 10.0
-        Initial penalty coefficient ρ.
-    lr_alpha : float, default 2e-4
-        Learning rate for α.
+        Initial penalty coefficient ρ (>0).
+    lr_alpha : float, default 2e-3
+        Learning rate for α parameters.
     alpha_epochs : int, default 500
         Number of training epochs.
-    log_interval : int, default 10
-        Print metrics every *log_interval* epochs.
-    clip_grad_norm : float, default 1.0
-        Gradient-norm clipping threshold; set ``None`` to disable.
+    scheduler_name : {"linear","cosine","step","exp","none"}, default "linear"
+        Learning-rate scheduler type.
+    scheduler_kw : dict or None
+        Extra kwargs for the scheduler (e.g., {"eta_min": 1e-5} for cosine).
+    log_interval : int, default 50
+        Print metrics every *log_interval* epochs (block is commented below).
+    clip_grad_norm : float or None, default 1.0
+        Gradient-norm clipping threshold; set None to disable.
 
     Returns
     -------
     nn.Module
-        The trained ``alpha_model`` (in eval mode).
+        The trained ``alpha_model`` (returned in eval mode).
     """
-    # ---------- optimiser ----------
+    alpha_model.train()
+
+    # ---------- optimizer ----------
     opt = torch.optim.AdamW(alpha_model.parameters(), lr=lr_alpha)
 
     # ---------- scheduler ----------
-    kw = {} if scheduler_kw is None else scheduler_kw
-    scheduler_name = scheduler_name.lower()
-    if scheduler_name == "cosine":
+    kw = {} if scheduler_kw is None else dict(scheduler_kw)
+    name = scheduler_name.lower()
+
+    if name == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt, T_max=alpha_epochs, **kw
         )
-    elif scheduler_name == "step":
-        # kw e.g. {"step_size": 100, "gamma": 0.5}
+    elif name == "step":
+        # e.g. {"step_size": 100, "gamma": 0.5}
         scheduler = torch.optim.lr_scheduler.StepLR(opt, **kw)
-    elif scheduler_name == "exp":
-        # kw e.g. {"gamma": 0.98}
+    elif name == "exp":
+        # e.g. {"gamma": 0.98}
         scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, **kw)
-    elif scheduler_name == "linear":
-        # kw 可包含 {"start_factor": 1.0, "end_factor": 0.0}
-        # start_factor × lr → end_factor × lr 线性变化，历时 alpha_epochs 个 step
+    elif name == "linear":
+        # {"start_factor": 1.0, "end_factor": 0.0} over alpha_epochs steps
         scheduler = torch.optim.lr_scheduler.LinearLR(
             opt,
-            start_factor = kw.get("start_factor", 1.0),
-            end_factor   = kw.get("end_factor",   0.0),
-            total_iters  = alpha_epochs
+            start_factor=kw.get("start_factor", 1.0),
+            end_factor=kw.get("end_factor", 0.0),
+            total_iters=alpha_epochs,
         )
-    elif scheduler_name == "none":
+    elif name == "none":
         scheduler = None
     else:
         raise ValueError(f"Unknown scheduler '{scheduler_name}'")
 
+    # Convenience helpers from your codebase
     cov00_fn = general_get_cov00_function_alpha_mar(moment_fn)
-    lam, rho = lambda_init, rho_init
+
+    # Dual/penalty variables
+    lam: float = max(0.0, float(lambda_init))
+    rho: float = max(1e-8, float(rho_init))
+    lam_lr: float = 0.5     # damping for lambda updates (0,1]
+    eps: float = 0.0        # optional slack: penalize only when g > tau + eps
+    tol: float = 1e-3       # treat <= tol as feasible (for rho adaptation)
+    rho_min, rho_max = 1e-4, 1e6
 
     for epoch in range(1, alpha_epochs + 1):
-        # ---- forward pass ----
-        cov00 = cov00_fn(alpha_model)
-        cost  = moment_fn(alpha_model)["E[c alpha1 + alpha2]"]
+        # ---- forward ----
+        cov00 = cov00_fn(alpha_model)                                # scalar tensor
+        cost  = moment_fn(alpha_model)["E[c alpha1 + alpha2]"]       # scalar tensor
         diff  = cost - tau
-        lagrangian = cov00 + lam * diff + 0.5 * rho * diff.pow(2)
+        viol  = torch.relu(diff - eps)                               # [g - tau - eps]_+
 
-        # ---- backward / optimiser ----
-        opt.zero_grad()
+        # Augmented Lagrangian with squared hinge -> no gradient when feasible
+        lagrangian = cov00 + lam * viol + 0.5 * rho * viol.pow(2)
+
+        # ---- backward / optimizer ----
+        opt.zero_grad(set_to_none=True)
         lagrangian.backward()
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(alpha_model.parameters(), clip_grad_norm)
@@ -1658,25 +1737,27 @@ def train_alpha_aug_lagrange(
         if scheduler is not None:
             scheduler.step()
 
-        # ---- λ update ----
-        lam = max(0.0, lam + rho * diff.item())
+        # ---- lambda update (only when constraint is violated) ----
+        lam = max(0.0, lam + lam_lr * rho * float(viol.item()))
 
-        # ---- ρ adaptation ----
-        if abs(diff.item()) < 0.05:
-            rho *= 0.9            # relax penalty near feasibility
-        elif epoch % 100 == 0:
-            rho *= 1.5            # toughen penalty if still infeasible
+        # ---- rho adaptation: relax when feasible; tighten if persistently infeasible ----
+        if float(viol.item()) <= tol:
+            rho = max(rho_min, rho * 0.8)       # relax penalty
+        else:
+            if epoch % 20 == 0:                 # tighten slowly to avoid oscillation
+                rho = min(rho_max, rho * 1.7)
 
-        # #---- logging ----
+        # # ---- logging (optional) ----
         # if epoch == 1 or epoch % log_interval == 0:
         #     current_lr = opt.param_groups[0]["lr"]
         #     print(
         #         f"Ep {epoch:4d} | lr={current_lr:.2e} | "
         #         f"L={lagrangian.item():.4f} | Cov00={cov00.item():.4f} | "
-        #         f"cost={cost.item():.4f} | diff={diff.item():.4f} | "
-        #         f"λ={lam:.2f} | ρ={rho:.2f}"
+        #         f"cost={cost.item():.4f} | viol={viol.item():.4f} | "
+        #         f"lambda={lam:.3f} | rho={rho:.3f}"
         #     )
 
+    alpha_model.eval()
     return alpha_model
 
 def train_alpha_with_penalty(
