@@ -1527,6 +1527,63 @@ def search_alpha_mcar(
         return _golden_section(mean_trace_float, lo, hi)
     else:
         raise ValueError(f"unknown method '{method}', choose 'golden' or 'adam'")
+
+def search_alpha_mcar_trace(
+    trace_funcs: Sequence[Callable[[Tensor], Tensor]],
+    tau: float,
+    c: float,
+    *,
+    eps: float = 1e-6,
+    method: str = "aug",              # "golden" | "adam"
+    device: torch.device | None = None,
+) -> float:
+    """
+    Minimise the averaged trace of covariance matrices over alpha1.
+
+    The feasible set for alpha1 is an interval [lo, hi] derived from
+    the budget and linear constraints:
+        alpha2 = tau − c * alpha1
+        alpha3 = 1 + (c − 1) * alpha1 − tau
+    """
+    up1  = tau / c
+    low1 = 0.0 if c == 1 else (tau - 1) / (c - 1)
+    lo, hi = max(eps, low1), min(1.0 - eps, up1)
+
+    # Callable that returns mean trace( Σ_hat ) for a given alpha1
+    def mean_trace(a1: Tensor) -> Tensor:
+        if not isinstance(a1, Tensor):
+            a1 = torch.tensor(a1, dtype=torch.float32, device=device)
+
+        val = sum(f(a1) for f in trace_funcs) / len(trace_funcs)
+        return val
+    if method == "adam":
+        alpha_opt = _adam_section(
+            mean_trace, lo, hi,
+            lr=5e-1, iters=800,
+            scheduler_name="linear",
+            scheduler_kw={"start_factor":1.0, "end_factor":0.01},
+            log_interval=10,
+            device=device
+        )
+        return alpha_opt
+    
+    elif method == "aug":                # <-- NEW: 1-D augmented-Lagrange search
+        # Only the box constraint (lo, hi) matters here, no extra inequality
+        return _aug_lagrange_section(
+            mean_trace, lo, hi,
+            lr=5e-3, iters=500,          # optimisation hyper-params
+            scheduler_name="linear",     # linear LR decay
+            scheduler_kw={"start_factor": 1.0, "end_factor": 0.0},
+            log_interval=10,             # print every 10 iterations
+            device=device
+        )
+    elif method == "golden":
+        # _golden_section expects a function that takes a float
+        def mean_trace_float(a1_float: float) -> float:
+            return float(mean_trace(torch.tensor(a1_float)).detach())
+        return _golden_section(mean_trace_float, lo, hi)
+    else:
+        raise ValueError(f"unknown method '{method}', choose 'golden' or 'adam'")
     
 
 def train_alpha_model(
@@ -1801,6 +1858,106 @@ def train_alpha_with_penalty(
 
     return alpha_model
 
+
+def train_alpha_aug_lagrange_trace(
+    alpha_model: nn.Module,
+    moment_fn: Callable[[nn.Module], Dict[str, 'Tensor | List[Tensor]']],
+    tau: float,
+    lambda_init: float = 0.0,
+    rho_init: float = 10.0,
+    *,
+    lr_alpha: float = 2e-3,
+    alpha_epochs: int = 500,
+    scheduler_name: str = "linear",
+    scheduler_kw: Optional[dict] = None,
+    log_interval: int = 50,
+    clip_grad_norm: float = 1.0,
+) -> nn.Module:
+    """
+    Augmented-Lagrangian training specialized for minimizing Tr(Cov(θ̂)) under
+    the inequality constraint g(α) = E[c·α₁ + α₂] <= τ.
+
+    Objective:
+        J(α) = Tr(Cov(θ̂)(α))
+    Lagrangian:
+        L(α, λ) = J(α) + λ·[g(α)−τ−eps]_+ + (ρ/2)·[g(α)−τ−eps]_+^2
+    """
+    alpha_model.train()
+
+    # ----- optimizer -----
+    opt = torch.optim.AdamW(alpha_model.parameters(), lr=lr_alpha)
+
+    # ----- scheduler -----
+    kw = {} if scheduler_kw is None else dict(scheduler_kw)
+    name = scheduler_name.lower()
+    if name == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=alpha_epochs, **kw)
+    elif name == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(opt, **kw)          # e.g. {"step_size": 100, "gamma": 0.5}
+    elif name == "exp":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, **kw)   # e.g. {"gamma": 0.98}
+    elif name == "linear":
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            opt,
+            start_factor=kw.get("start_factor", 1.0),
+            end_factor=kw.get("end_factor", 0.0),
+            total_iters=alpha_epochs,
+        )
+    elif name == "none":
+        scheduler = None
+    else:
+        raise ValueError(f"Unknown scheduler '{scheduler_name}'")
+
+    # ----- trace objective -----
+    trace_fn = general_get_trace_variance_function_alpha_mar(moment_fn, return_full=False)
+
+    # ----- dual/penalty vars -----
+    lam: float = max(0.0, float(lambda_init))
+    rho: float = max(1e-8, float(rho_init))
+    lam_lr: float = 1.0       # was 0.5 → faster dual response
+    eps: float = 1e-3         # was 0.0 → ignore tiny numeric violations
+    tol: float = 1e-3
+    rho_min, rho_max = 1e-4, 1e6
+
+    for epoch in range(1, alpha_epochs + 1):
+        # forward
+        obj  = trace_fn(alpha_model)                                      # scalar tensor: Tr(Cov)
+        cost = moment_fn(alpha_model)["E[c alpha1 + alpha2]"]             # scalar tensor
+        viol = torch.relu(cost - tau - eps)                               # [g - tau - eps]_+
+
+        lagrangian = obj + lam * viol + 0.5 * rho * viol.pow(2)
+
+        # backward/step
+        opt.zero_grad(set_to_none=True)
+        lagrangian.backward()
+        if clip_grad_norm is not None:
+            torch.nn.utils.clip_grad_norm_(alpha_model.parameters(), clip_grad_norm)
+        opt.step()
+        if scheduler is not None:
+            scheduler.step()
+
+        # lambda update (projected)
+        lam = max(0.0, lam + lam_lr * rho * float(viol.item()))
+
+        # rho adaptation (slightly stronger/faster)
+        if float(viol.item()) <= tol:
+            rho = max(rho_min, rho * 0.7)           # relax a bit faster
+        else:
+            if epoch % 10 == 0:                     # tighten a bit sooner
+                rho = min(rho_max, rho * 2.0)
+
+        # # optional logging
+        # if epoch == 1 or epoch % log_interval == 0:
+        #     lr_now = opt.param_groups[0]["lr"]
+        #     print(
+        #         f"Ep {epoch:4d} | lr={lr_now:.2e} | "
+        #         f"L={lagrangian.item():.4f} | Tr(Cov)={obj.item():.4f} | "
+        #         f"cost={cost.item():.4f} | viol={viol.item():.4f} | "
+        #         f"lambda={lam:.3f} | rho={rho:.3f}"
+        #     )
+
+    alpha_model.eval()
+    return alpha_model
 # ----------------------------------------------------------------------
 def lm_mono_debias_estimate(
     X: Tensor,                   # (n, d)

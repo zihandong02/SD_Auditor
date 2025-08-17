@@ -13,6 +13,58 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
+def plot_l2_vs_tau(
+    df: pd.DataFrame,
+    out_dir: Path,
+    prefix: str = "l2_err",
+    c_value: float | None = None,
+):
+    """
+    Plot L2 error vs tau in a single axis.
+
+    df:        DataFrame indexed by tau; columns start with 'mean_l2_'.
+               Example: mean_l2_opt, mean_l2_mar, mean_l2_base, mean_l2_ols
+    out_dir:   output directory
+    prefix:    filename prefix (default: 'l2_err' -> 'l2_err_vs_tau.pdf')
+    c_value:   number shown at the top title, e.g., 'c = 0.5'
+    """
+    # style
+    colors  = ["#1b9e77", "#d95f02", "#7570b3", "#e7298a"]
+    markers = ["o", "s", "^", "D"]
+
+    # detect L2 columns
+    l2_cols = [c for c in df.columns if c.startswith("mean_l2_")]
+    if not l2_cols:
+        raise ValueError("No columns starting with 'mean_l2_' found in the CSV.")
+
+    # pretty labels
+    nice = {
+        "mean_l2_opt":  "OPT",
+        "mean_l2_mar":  "MAR",
+        "mean_l2_base": "Base",
+        "mean_l2_ols":  "OLS",
+    }
+    labels = [nice.get(col, col.replace("mean_l2_", "").upper()) for col in l2_cols]
+
+    # figure
+    fig, ax = plt.subplots(1, 1, figsize=(6.5, 4.0))
+    for col, color, marker, lab in zip(l2_cols, colors, markers, labels):
+        ax.plot(df.index, df[col], marker=marker, linestyle="-", color=color, label=lab)
+
+    ax.set_xlabel(r"$\tau$")
+    ax.set_ylabel(r"$\ell_2$ error")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(title="Method", loc="best")
+
+    if c_value is not None:
+        fig.suptitle(fr"$c = {c_value:g}$", y=1.02, fontsize=12)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    savepath = out_dir / f"{prefix}_vs_tau.pdf"
+    fig.savefig(savepath, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[INFO] saved L2 plot to {savepath}")
+
 def plot_ci_and_cov_vs_tau(
     df: pd.DataFrame,
     alpha_level: float,

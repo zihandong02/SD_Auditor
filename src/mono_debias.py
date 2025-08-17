@@ -51,9 +51,11 @@ from .estimators import (
     general_get_trace_variance_function_alpha_mar,# return g(alpha1) (MAR)
     general_get_cov00_function_alpha_mar,        # return g00(alpha1) (MAR)
     search_alpha_mcar,                            # public API: "golden" | "adam"
+    search_alpha_mcar_trace,                            # public API: "golden" | "adam"
     train_alpha_with_lagrangian,                # train a neural network to predict α₁
     train_alpha_aug_lagrange,                   # train a neural network to predict α₁
     train_alpha_with_penalty,                # train a neural network to predict α₁
+    train_alpha_aug_lagrange_trace,          # train a neural network to predict α₁
     lm_mono_debias_estimate,                 # 3-fold cross-fit efficient θ̂
 )
 
@@ -156,7 +158,7 @@ def lm_mono_debias_estimate_mcar_crossfit(
 # ======================================================================
 
 
-def lm_mono_debias_budget_constrained_obtain_alpha_mcar(
+def lm_mono_debias_budget_constrained_obtain_alpha_mcar_trace(
     X: Tensor, Y: Tensor,
     W1: Tensor, W2: Tensor, V: Tensor,
     R: Tensor,                    # (n,) int64 in {1,2,3}
@@ -217,7 +219,7 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mcar(
         cov_funcs.append(cov_f)
 
     # ---------- optimise α₁ with your Adam search ---------
-    alpha1_opt = search_alpha_mcar(
+    alpha1_opt = search_alpha_mcar_trace(
         trace_funcs, tau, c,
         eps=eps,
         method="adam",
@@ -543,9 +545,101 @@ def lm_mono_debias_budget_constrained_obtain_alpha_mar_cov00(
 
     return alpha_model, cov00, cov_full
 
+
+def lm_mono_debias_budget_constrained_obtain_alpha_mar_trace(
+    X:  Tensor,
+    Y:  Tensor,
+    W1: Tensor,
+    W2: Tensor,
+    V:  Tensor,
+    R:  Tensor,                 # (n,) int64 in {1,2,3}
+    tau: float,
+    c:   float,
+    method: str = "mlp",
+    alpha_hidden_dim: int = 32,
+    alpha_epochs: int = 1500,
+    alpha_lr: float = 0.01,
+) -> Tuple[nn.Module, float, Tensor]:
+    """
+    Single-split MAR debiasing with budget constraint, specialized for
+    minimizing Tr(Cov(θ̂)).
+
+    Returns:
+        alpha_model : trained AlphaModel
+        trace_val   : float = Tr(Cov(θ̂)) at the trained α
+        cov_full    : Tensor (d, d) = full covariance matrix Cov(θ̂)
+    """
+    device = X.device
+
+    # 1) Alpha model
+    dim_x, dim_w1, dim_w2 = X.size(1), W1.size(1), W2.size(1)
+    alpha_model = AlphaModel(
+        dim_x, dim_w1, dim_w2,
+        hidden_dim=alpha_hidden_dim,
+        hidden_dim2=alpha_hidden_dim
+    ).to(device)
+
+    # 2) 50/50 split
+    n = X.size(0)
+    idx_moment, idx_build = sample_split(n, 2, device=device)
+    def subset(idxs: Tensor):
+        return X[idxs], Y[idxs], W1[idxs], W2[idxs], V[idxs], R[idxs]
+    X1, Y1, W11, W21, V1, R1 = subset(idx_moment)
+    X2, Y2, W12, W22, V2, R2 = subset(idx_build)
+
+    # 3) ψ on build set (R2 == 1)
+    mask2 = (R2 == 1).squeeze(1)
+    theta_pre = lm_fit_wls(X2[mask2], Y2[mask2])
+    psi_1, psi_2, psi_3 = lm_build_all_psi(
+        X2[mask2], Y2[mask2], W12[mask2], W22[mask2], V2[mask2],
+        theta_pre, method=method
+    )
+
+    # 4) φ builders (depend on alpha_model)
+    phi_1, phi_2, phi_3 = general_build_all_phi_function_mar(psi_2, psi_3)
+
+    # 5) MAR-weighted moment_fn on moment set (R1 == 1)
+    mask1 = (R1 == 1).squeeze(1)
+    moment_fn = general_estimate_moments_function_mar(
+        psi_1, phi_1, phi_2, phi_3,
+        X1[mask1], Y1[mask1], W11[mask1], W21[mask1], V1[mask1],
+        c=c
+    )
+
+    # 6) Train α to minimize Tr(Cov)
+    alpha_model = train_alpha_aug_lagrange_trace(
+        alpha_model   = alpha_model,
+        moment_fn     = moment_fn,
+        tau           = tau,
+        lambda_init   = 5.0,                 # stronger initial multiplier
+        rho_init      = 100.0,                # penalty on same order as Tr(Cov)
+        lr_alpha      = 1e-2,                 # smaller, more stable step
+        alpha_epochs  = alpha_epochs,
+        scheduler_name= "linear",
+        scheduler_kw  = {"start_factor": 1.0, "end_factor": 0.01},
+    )
+
+    # 7) Evaluate trace and full covariance
+    trace_fn = general_get_trace_variance_function_alpha_mar(moment_fn, return_full=False)
+    trace_val = float(trace_fn(alpha_model).item())
+    print(f"[MAR] trace(Cov) = {trace_val:.6f}")
+
+    cost = moment_fn(alpha_model)["E[c alpha1 + alpha2]"].item()
+    print(f"[MAR] Final constraint E[c*alpha1 + alpha2] = {cost:.6f} (tau = {tau:.6f})")
+    if cost <= tau:
+        print("✅ Constraint satisfied: E[c*alpha1 + alpha2] <= tau")
+    else:
+        print("❌ Constraint violated: E[c*alpha1 + alpha2] > tau")
+
+    cov_full_fn = general_get_trace_variance_function_alpha_mar(moment_fn, return_full=True)
+    cov_full = cov_full_fn(alpha_model)  # (d, d)
+
+    return alpha_model, trace_val, cov_full
 # ======================================================================
 # 1) Algorithm 1 wrapper  (choose alpha* & evaluate)
 # ======================================================================
+
+
 
 def lm_fix_alpha(
     *,
@@ -734,8 +828,147 @@ def lm_fix_alpha(
         covg_ols = float(sum(cov_ols) / reps),
     )
 
+def lm_fix_alpha_trace_l2only(
+    *,
+    # --------------- batch sizes -----------------
+    n1: int,
+    n2: int,
+    reps: int,
+    # --------------- model dims ------------------
+    d_x: int,
+    d_u1: int,
+    d_u2: int,
+    # --------------- model parameters ------------
+    theta_star: torch.Tensor,        # (d,)
+    beta1_star: torch.Tensor,
+    beta2_star: torch.Tensor,
+    # --------------- noise -----------------------
+    sigma_eps: float,
+    # --------------- MCAR / CI -------------------
+    alpha_level: float,              # kept for signature compatibility; unused
+    tau: float,
+    c: float,
+    alpha_init: torch.Tensor,        # (3,)
+    # --------------- misc ------------------------
+    seed: int = 42,
+) -> Dict[str, float]:
+    """
+    L2-only evaluation:
+      - Stage-1 obtains alphas via *trace*-optimized routines (MCAR + MAR).
+      - Stage-2 records ONLY vector L2 errors ||theta_hat - theta_star||_2 for:
+        MCAR(trace-opt), MAR(trace-opt), MCAR(baseline), and OLS.
+      - No CI length, coverage, or cov00 returned.
+    """
+    device, dtype = theta_star.device, theta_star.dtype
+    set_global_seed(seed)
+
+    # ---------- Stage-1: obtain alpha* (trace objective) ----------
+    X1, Y1, W1_1, W2_1, V1, R1 = lm_generate_obs_data_mcar(
+        n=n1,
+        d_x=d_x, d_u1=d_u1, d_u2=d_u2,
+        theta_star=theta_star,
+        beta1_star=beta1_star,
+        beta2_star=beta2_star,
+        alpha=alpha_init,
+        Sigma_X=None, Sigma_U1=None, Sigma_U2=None,
+        sigma_eps=sigma_eps,
+    )
+
+    # MCAR: alpha that minimizes Tr(Cov)
+    alpha_opt, _trace_opt, _ = lm_mono_debias_budget_constrained_obtain_alpha_mcar_trace(
+        X1, Y1, W1_1, W2_1, V1, R1,
+        tau=tau, c=c, method="mlp"
+    )
+    # MAR: function-valued alpha that minimizes Tr(Cov)
+    alpha_model_opt, _trace_model_opt, _ = lm_mono_debias_budget_constrained_obtain_alpha_mar_trace(
+        X1, Y1, W1_1, W2_1, V1, R1,
+        tau=tau, c=c, method="mlp"
+    )
+
+    # Baseline alpha with alpha2 = 0 and alpha3 = 1 + (c-1) * alpha1 - tau
+    alpha1_base = tau / c
+    alpha_baseline = torch.tensor(
+        [alpha1_base,
+         0.0,
+         1.0 + (c - 1.0) * alpha1_base - tau],
+        device=device, dtype=dtype
+    )
+
+    # ------------- containers for Stage-2 (L2 only) -------------
+    err_opt, err_mar, err_base, err_ols = [], [], [], []
+
+    # =================== Stage-2 loop ===========================
+    for rep in tqdm(range(reps), total=reps):
+        set_global_seed(seed + rep)
+
+        # 1) Generate complete data once
+        X2, Y2, W1_2, W2_2, V2 = lm_generate_complete_data(
+            n=n2, d_x=d_x, d_u1=d_u1, d_u2=d_u2,
+            theta_star=theta_star,
+            beta1_star=beta1_star,
+            beta2_star=beta2_star,
+            Sigma_X=None, Sigma_U1=None, Sigma_U2=None,
+            sigma_eps=sigma_eps,
+        )
+
+        # ----- Batch-A : alpha_opt (MCAR) ------------------------
+        X2A, Y2A, W1A, W2A, V2A, R2A = general_generate_mcar(
+            X2, Y2, W1_2, W2_2, V2,
+            alpha=alpha_opt
+        )
+        theta_opt_vec, _ = lm_mono_debias_estimate_mcar_crossfit(
+            X2A, Y2A, W1A, W2A, V2A, R2A,
+            alpha=alpha_opt, method="mlp"
+        )
+        theta_opt_vec = theta_opt_vec.view(-1)
+
+        # ----- Batch-MAR : alpha_model_opt -----------------------
+        X2M, Y2M, W1M, W2M, V2M, R2M = general_generate_mar(
+            X2, Y2, W1_2, W2_2, V2,
+            alpha_fn=alpha_model_opt
+        )
+        theta_mar_vec, _ = lm_mono_debias_estimate_mar_crossfit(
+            X2M, Y2M, W1M, W2M, V2M, R2M,
+            alpha_fn=alpha_model_opt, method="mlp"
+        )
+        theta_mar_vec = theta_mar_vec.view(-1)
+
+        # ----- Batch-B : alpha_baseline (MCAR) -------------------
+        X2B, Y2B, W1B, W2B, V2B, R2B = general_generate_mcar(
+            X2, Y2, W1_2, W2_2, V2,
+            alpha=alpha_baseline
+        )
+        theta_base_vec, _ = lm_mono_debias_estimate_mcar_crossfit(
+            X2B, Y2B, W1B, W2B, V2B, R2B,
+            alpha=alpha_baseline, method="mlp"
+        )
+        theta_base_vec = theta_base_vec.view(-1)
+
+        # ----- OLS reference on observed rows --------------------
+        mask_ols = ~torch.isnan(Y2B).view(-1)
+        X_ols = X2B[mask_ols]
+        Y_ols = Y2B[mask_ols]
+        theta_ols_vec = lm_fit_ols(X_ols, Y_ols).view(-1)
+
+        # ----- accumulate vector-L2 errors -----------------------
+        theta_star_vec = theta_star.view(-1)
+        err_opt .append(torch.linalg.norm(theta_opt_vec  - theta_star_vec).item())
+        err_mar .append(torch.linalg.norm(theta_mar_vec  - theta_star_vec).item())
+        err_base.append(torch.linalg.norm(theta_base_vec - theta_star_vec).item())
+        err_ols .append(torch.linalg.norm(theta_ols_vec  - theta_star_vec).item())
+
+    # ---------------- aggregate & return (L2 only) --------------
+    return dict(
+        mean_l2_opt  = float(sum(err_opt)  / reps),
+        mean_l2_mar  = float(sum(err_mar)  / reps),
+        mean_l2_base = float(sum(err_base) / reps),
+        mean_l2_ols  = float(sum(err_ols)  / reps),
+    )
 
 
+
+
+# ======================================================================
 def lm_change_alpha_every_iter(
     *,
     # -------- batch sizes --------
