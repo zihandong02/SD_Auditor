@@ -28,7 +28,7 @@ import pandas as pd
 sys.path.append(os.path.abspath(".."))  # adjust if needed
 
 from src.utils      import set_global_seed, get_device, dump_run_simple
-from src.mono_debias import lm_fix_alpha, lm_change_alpha_every_iter, lm_mcar_extended  # Algorithm‑1 wrapper
+from src.lm_mono_debias import lm_fix_alpha, lm_change_alpha_every_iter, lm_mcar_extended  # Algorithm‑1 wrapper
 
 # =====================================================================
 # CLI
